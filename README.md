@@ -1,6 +1,6 @@
-﻿# MOMO — YAMAMOMO ETF Data API
+﻿# MOMO — ETF Data API
 
-`Momo` adalah modul Python untuk mengambil data komprehensif sebuah ETF (*overview*, *holdings*, *dividend*, *news*) dari [stockanalysis.com](https://stockanalysis.com). Modul ini bukan server HTTP — ia adalah **library Python** yang dipakai lewat `import momo`, sehingga "menggunakannya sebagai API" berarti memanggil fungsi/class-nya langsung di kode Python Anda.
+*Aku cinta my Yamamomo><*
 
 **Versi:** `2.0.2`
 
