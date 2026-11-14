@@ -353,18 +353,6 @@ print(result["RSI (14)"])
 - Results are for informational and research purposes only, not investment
   advice.
 
-## Development and tests
-
-Install the test extra and run the offline suite:
-
-```bash
-python -m pip install -e ".[test]"
-python -m pytest -q
-```
-
-Tests use local fixtures and mocks for data-fetching workflows; the suite does
-not require live market-data requests.
-
 ## Project layout
 
 ```text
@@ -380,5 +368,4 @@ src/momo/
   parsers/             ETF and stock page parsers
   assemblers/          Stable ETF and stock payload schemas
   engine/              Optional technical, fundamental, and report analysis
-tests/                 Offline parser, client, and analysis tests
 ```
