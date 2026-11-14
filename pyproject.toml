@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "momo"
+version = "3.1.6a0"
+description = "Stock and ETF research data collection and analysis"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["requests>=2.31", "beautifulsoup4>=4.12"]
+
+[project.optional-dependencies]
+analysis = ["numpy>=1.24", "pandas>=2.0", "yfinance>=0.2.40"]
+cli = ["rich>=13.7", "typer>=0.12"]
+test = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["momo*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

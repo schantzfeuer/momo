@@ -1,16 +1,7 @@
-# MOMO core
 requests>=2.31
 beautifulsoup4>=4.12
-
-# Analysis engine
 numpy>=1.24
 pandas>=2.0
-
-# Professional CLI
+yfinance>=0.2.40
 rich>=13.7
 typer>=0.12
-
-# Historical OHLCV / technical analysis
-# Optional for fundamental-only mode (--no-price), recommended for full analysis.
-yfinance>=0.2.40
-curl_cffi>=0.7
