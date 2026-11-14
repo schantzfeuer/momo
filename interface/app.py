@@ -172,7 +172,7 @@ def main(
     visual: bool = typer.Option(
         False,
         "--visual",
-        help="Create and open a standalone visual stock chart report.",
+        help="Open a readable stock dashboard with plain-language summaries and expandable analysis details.",
     ),
     verbose: bool = typer.Option(
         False,

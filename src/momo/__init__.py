@@ -1,6 +1,6 @@
 """Momo stock and ETF data collection library."""
 
-__version__ = "3.1.6a0"
+__version__ = "3.1.6a1"
 
 from .api import get_overview, get_holdings, get_dividends, get_news, get_etf_data, get_data, get_stock_section, get_stock_data, get_stock_overview, get_stock_company, get_stock_financials, get_stock_statistics, get_stock_forecast, get_stock_ratings, get_stock_market_cap, get_stock_revenue, get_stock_dividends, get_stock_business_metrics, analyze_stock_data, analyze_stock, compare, compare_stocks
 from .assemblers.etf import assemble_etf_data

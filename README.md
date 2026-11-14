@@ -5,7 +5,7 @@ JSON. Stock analysis combines business and financial data with technical
 indicators, valuation estimates, and multi-timeframe scenarios. ETFs are
 available through a separate workflow.
 
-**Version:** `3.1.6a0` · **Python:** `3.10+`
+**Version:** `3.1.6a1` · **Python:** `3.10+`
 
 MOMO is a research aid, not a trading system or personalized investment advice.
 Valuations and projections are model-based estimates, not promises about future
@@ -76,10 +76,10 @@ python main.py AAPL --timeframes 1m,3m,6m,12m
 # Create and open a visual stock dashboard
 python main.py AAPL --visual
 
-# Request selected stock sections
+# Fetch selected stock sections (the terminal report remains a summary)
 python main.py AAPL --sections overview,financials,forecast
 
-# Save stock data, analysis, and report JSON files
+# Save the fetched section data, analysis, and report as JSON
 python main.py AAPL --json --output-dir output
 
 # Save fetched HTML pages for parser debugging or offline parsing
@@ -96,12 +96,12 @@ python main.py --help
 | `TICKER...` | One or more ticker symbols. Stocks are assumed unless `--etf` is supplied. |
 | `--etf` | Use the ETF workflow. |
 | `--compare`, `-c` | Display a comparison for the supplied tickers. |
-| `--sections`, `-s` | Comma-separated sections to fetch. Available sections depend on the selected asset type. |
+| `--sections`, `-s` | Comma-separated sections to fetch. For stocks, this limits fetched data; it does not select or add panels to the terminal report. Available sections depend on the selected asset type. |
 | `--timeframes`, `-t` | Stock analysis horizons: any combination of `1m`, `3m`, `6m`, and `12m`. |
 | `--period` | Historical price period for technical analysis; default `5y`. |
 | `--interval` | Historical price interval; default `1d`. |
 | `--price` / `--no-price` | Enable or disable automatic historical price retrieval. |
-| `--visual` | Generate and open a standalone HTML stock dashboard with price, volume, momentum, and timeframe views. Requires historical price data; stocks only. |
+| `--visual` | Generate and open a readable HTML stock dashboard with plain-language summaries, price charts, and expandable valuation, business, technical, and data-quality details. Requires historical price data; stocks only. |
 | `--json` | Save JSON output. |
 | `--output-dir`, `-o` | Directory for JSON and debug HTML output; default is the current directory. |
 | `--cache` / `--no-cache` | Enable or disable in-memory caching. |
@@ -124,7 +124,12 @@ ETF sections include `overview`, `performance`, `holdings`, `sectors`,
 
 With the default stock section selection, MOMO discovers the business-metric
 detail pages available for that ticker. Supplying `--sections` requests only
-the selected stock sections.
+the selected stock sections. This option controls data retrieval, not terminal
+report layout: the stock CLI still displays its summarized report rather than
+printing each requested section in full. To inspect the fetched section data,
+use `--json` and open `momo_<ticker>_stock.json` in the output directory. For
+example, statement data is nested under `financials.incomeStatement` and
+`financials.balanceSheet`.
 
 When `--json` is used for a stock, output files include
 `momo_<ticker>_stock.json`, `momo_<ticker>_analysis.json`, and
@@ -177,11 +182,14 @@ print(stock["ticker"])
 print(stock["quote"])
 
 report = momo.analyze_stock("AAPL", timeframes=["1m", "6m", "12m"])
-print(report["executiveSummary"])
-print(report["fairValue"])
+summary = report["executiveSummary"]
+print(summary["stance"], summary["overallScore"])
+print(report["fairValue"]["fundamental"])
+for horizon, outlook in report["timeframes"].items():
+    print(horizon, outlook["stance"], outlook["fairValue"]["base"])
 
 etf = momo.get_etf_data("VOO")
-print(etf["holdings"])
+print(etf["profile"])
 ```
 
 `analyze_stock` fetches stock data and runs the integrated analysis. To analyze
@@ -254,11 +262,78 @@ stock = momo.get_stock_data(
     "NVDA",
     sections=["overview", "financials", "forecast", "ratings"],
 )
+income_statement = momo.get_stock_section("NVDA", "income_statement")
+print(income_statement.keys())
 ```
 
 With `sections=None` (the default), the stock data workflow requests the
 standard sections and discovers available metric-detail pages. Providing an
 explicit section list limits the request to those sections.
+
+Selected stock data is assembled into a nested payload. For example, the
+income statement is available at `stock["financials"]["incomeStatement"]`:
+
+```python
+import momo
+
+stock = momo.get_stock_data(
+    "AAPL",
+    sections=["overview", "income_statement", "balance_sheet"],
+)
+
+income = (stock.get("financials") or {}).get("incomeStatement") or {}
+for row in (income.get("rows") or [])[:5]:
+    print(row.get("datekey"), row)
+```
+
+The unified `get_data` function can fetch either asset type. `sections` applies
+only to stocks:
+
+```python
+import momo
+
+stock = momo.get_data(
+    "MSFT",
+    asset_type="stock",
+    sections=["overview", "financials"],
+)
+etf = momo.get_data("VOO")  # ETF is the default asset type
+```
+
+### ETF data and comparisons
+
+Retrieve ETF holdings and dividend data from the assembled payload, or fetch
+one component when you do not need the complete result:
+
+```python
+import momo
+
+etf = momo.get_etf_data("VOO")
+holdings = (etf.get("holdings") or {}).get("topHoldings") or []
+for holding in holdings[:5]:
+    print(holding)
+
+dividend_data = momo.get_dividends("VOO")
+print(dividend_data.get("metrics"))
+```
+
+Fetch several tickers with `compare_stocks` or `compare`. These return one
+payload per ticker in the same order as the input:
+
+```python
+import momo
+
+stocks = momo.compare_stocks(
+    ["AAPL", "MSFT", "NVDA"],
+    sections=["overview", "financials", "forecast"],
+)
+for stock in stocks:
+    print(stock["ticker"], stock.get("errors", []))
+
+etfs = momo.compare(["VOO", "QQQ", "SCHD"])
+for etf in etfs:
+    print(etf["ticker"], (etf.get("profile") or {}).get("name"))
+```
 
 Use `dump_json=True` to write a data payload to JSON. `dump_path` can specify
 the destination path:

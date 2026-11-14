@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "momo"
-version = "3.1.6a0"
+version = "3.1.6a1"
 description = "Stock and ETF research data collection and analysis"
 readme = "README.md"
 requires-python = ">=3.10"
