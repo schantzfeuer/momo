@@ -1,4 +1,5 @@
 from __future__ import annotations
+import copy
 from typing import Any, Dict, List, Mapping, Optional
 from ..core.validation import _validate_ticker
 from ..extractors.normalizers import _dedupe_news, _now_iso
@@ -78,4 +79,4 @@ def assemble_stock_data(
     }
     if errors:
         data["errors"] = errors
-    return data
+    return copy.deepcopy(data)

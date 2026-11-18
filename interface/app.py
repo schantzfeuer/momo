@@ -107,9 +107,9 @@ def main(
         help="Stock analysis timeframes: any combination of 1m,3m,6m,12m.",
     ),
     period: str = typer.Option(
-        "5y",
+        "10y",
         "--period",
-        help="Historical OHLCV period for the technical engine (default 5y).",
+        help="Historical OHLCV period for the technical engine (default 10y).",
     ),
     interval: str = typer.Option(
         "1d",
@@ -143,7 +143,7 @@ def main(
         15.0,
         "--timeout",
         min=1.0,
-        help="StockAnalysis HTTP timeout in seconds.",
+        help="Network request timeout in seconds.",
     ),
     retries: int = typer.Option(
         3,
@@ -172,7 +172,12 @@ def main(
     visual: bool = typer.Option(
         False,
         "--visual",
-        help="Open a readable stock dashboard with plain-language summaries and expandable analysis details.",
+        help="Generate and open the dedicated stock or ETF research dashboard.",
+    ),
+    technical: bool = typer.Option(
+        False,
+        "--technical",
+        help="Run price-only technical analysis for the supplied stocks or ETFs.",
     ),
     verbose: bool = typer.Option(
         False,
@@ -207,16 +212,16 @@ def main(
     if not normalized:
         raise typer.Exit(code=2)
 
-    if visual and etf:
-        raise typer.BadParameter("--visual is available for stocks only; remove --etf.")
-    if visual and not price:
-        raise typer.BadParameter("--visual requires historical price data; remove --no-price.")
+    if visual and not price and not etf:
+        raise typer.BadParameter("--visual for stocks requires historical price data; remove --no-price.")
+    if technical and visual:
+        raise typer.BadParameter("--technical produces a terminal report; remove --visual.")
 
     if verbose:
         enable_logging(logging.DEBUG)
 
     output_dir = output_dir.expanduser().resolve()
-    if dump_json or debug_html or visual:
+    if dump_json or debug_html or visual or etf:
         output_dir.mkdir(parents=True, exist_ok=True)
 
     config = MomoConfig(
@@ -234,7 +239,31 @@ def main(
         console.print(render_banner(asset_type, normalized))
 
     try:
-        if etf:
+        if technical:
+            reports = []
+            with Momo(config=config) as client:
+                for ticker in normalized:
+                    report = client.Technical(
+                        ticker, period=period, interval=interval, auto_fetch_price=price,
+                        timeframes=_timeframes_from_option(timeframes),
+                    )
+                    reports.append(report)
+                    if dump_json:
+                        _json_dump(output_dir / f"momo_{ticker.lower()}_technical.json", report)
+            table = Table(show_header=True, header_style=f"bold {PALETTE['brand']}", box=box.SIMPLE_HEAVY)
+            for column in ("Ticker", "Timeframe", "Trend", "Score", "Confidence"):
+                table.add_column(column)
+            for report in reports:
+                timeframes_data = report.get("timeframes") or {}
+                if not timeframes_data:
+                    table.add_row(str(report.get("ticker")), "—", str(report.get("reason") or "Unavailable"), "—", "—")
+                for key, result in timeframes_data.items():
+                    table.add_row(str(report.get("ticker")), str(key), str(result.get("trend") or "—"),
+                                  str(result.get("technicalScore") if result.get("technicalScore") is not None else "—"),
+                                  str(result.get("confidence") if result.get("confidence") is not None else "—"))
+            console.print(Panel(table, title="Technical Analysis", border_style=PALETTE["brand"]))
+            exit_code = 0 if all(report.get("available") for report in reports) else 1
+        elif etf:
             etf_sections = _expand_etf_sections([x.lower() for x in _parse_csv(sections)] or ["all"])
             exit_code = run_etf_pipeline(
                 normalized,
@@ -244,6 +273,10 @@ def main(
                 output_dir=output_dir,
                 debug_html=debug_html,
                 compare=compare,
+                visual=visual or etf,
+                period=period,
+                interval=interval,
+                use_price=price,
             )
         else:
             stock_sections = _stock_sections_from_option(sections)
@@ -266,6 +299,9 @@ def main(
     except typer.BadParameter as exc:
         console.print(Panel(str(exc), title="Invalid option", border_style=PALETTE["bad"]))
         raise typer.Exit(code=2)
+    except MomoError as exc:
+        console.print(Panel(str(exc), title="Analysis unavailable", border_style=PALETTE["bad"]))
+        raise typer.Exit(code=1)
     except KeyboardInterrupt:
         console.print("\n[bright_yellow]Cancelled by the user.[/bright_yellow]")
         raise typer.Exit(code=130)

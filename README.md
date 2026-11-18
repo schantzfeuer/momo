@@ -1,446 +1,178 @@
-# MOMO — Stock and ETF Research CLI
+# Momo: Stock and ETF Research
 
-MOMO collects public stock and ETF data and presents it as terminal reports or
-JSON. Stock analysis combines business and financial data with technical
-indicators, valuation estimates, and multi-timeframe scenarios. ETFs are
-available through a separate workflow.
+Momo collects public stock and ETF data and presents it as Python objects, terminal reports, JSON, or standalone HTML dashboards. It gives developers a consistent way to inspect provider data and run fundamental or price-based analysis. Estimates and indicators are research outputs, not investment advice or guaranteed forecasts.
 
-**Version:** `3.1.6a1` · **Python:** `3.10+`
+## Quickstart
 
-MOMO is a research aid, not a trading system or personalized investment advice.
-Valuations and projections are model-based estimates, not promises about future
-prices.
+**Prerequisites:** Python 3.10 or later, pip, and network access to the configured data providers. The analysis extra includes TA-Lib, which may need a platform-specific native prerequisite; see [Installation](docs/getting-started/installation.md).
 
-## Installation
-
-Create and activate a virtual environment, then install the package with its
-analysis and CLI features:
-
-```bash
-python -m venv .venv
-```
-
-On Windows PowerShell:
+From the project directory:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -e ".[analysis,cli]"
+py -m pip install -e ".[analysis,cli]"
+py -m momo AAPL
 ```
 
-On macOS or Linux:
+The first command installs the editable package with analysis and CLI dependencies. The second runs a stock report. Use `py -m momo --help` to see the CLI options.
 
-```bash
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[analysis,cli]"
+## Core usage
+
+### Research stocks and compare tickers
+
+```powershell
+py -m momo NVDA
+py -m momo NVDA MSFT GOOGL --compare
 ```
 
-Alternatively, install the complete runtime dependency set from
-[`requirements.txt`](requirements.txt), then install the project for Python
-imports:
+### Research ETFs
 
-```bash
-python -m pip install -r requirements.txt
-python -m pip install -e .
+Pass `--etf` to select the ETF flow:
+
+```powershell
+py -m momo --etf VOO
+py -m momo --etf VOO QQQ SCHD --compare
 ```
 
-The base package supports data collection and parsing. The `analysis` extra
-installs NumPy, pandas, and yfinance; the `cli` extra installs Rich and Typer.
-Analysis and CLI features require those extras.
+### Save JSON or create a dashboard
 
-## CLI usage
-
-Run commands from the project folder. Stocks are the default; pass `--etf` to
-select the ETF workflow.
-
-```bash
-# Analyze one stock
-python main.py AAPL
-
-# Compare stocks
-python main.py AAPL MSFT NVDA --compare
-
-# Fetch an ETF report
-python main.py --etf VOO
-
-# Compare ETFs
-python main.py --etf VOO QQQ SCHD --compare
-
-# Run a fundamental-only stock analysis without historical price downloads
-python main.py AAPL --no-price
-
-# Choose analysis timeframes
-python main.py AAPL --timeframes 1m,3m,6m,12m
-
-# Create and open a visual stock dashboard
-python main.py AAPL --visual
-
-# Fetch selected stock sections (the terminal report remains a summary)
-python main.py AAPL --sections overview,financials,forecast
-
-# Save the fetched section data, analysis, and report as JSON
-python main.py AAPL --json --output-dir output
-
-# Save fetched HTML pages for parser debugging or offline parsing
-python main.py AAPL --debug-html --output-dir downloaded_html
-
-# Show all options
-python main.py --help
+```powershell
+py -m momo NVDA --json --output-dir output
+py -m momo NVDA --visual --output-dir output
 ```
 
-### CLI options
+The CLI writes generated files to the selected output directory. Output file names depend on the selected mode and ticker; see the [CLI guide](docs/guides/cli.md).
 
-| Option | Description |
-| --- | --- |
-| `TICKER...` | One or more ticker symbols. Stocks are assumed unless `--etf` is supplied. |
-| `--etf` | Use the ETF workflow. |
-| `--compare`, `-c` | Display a comparison for the supplied tickers. |
-| `--sections`, `-s` | Comma-separated sections to fetch. For stocks, this limits fetched data; it does not select or add panels to the terminal report. Available sections depend on the selected asset type. |
-| `--timeframes`, `-t` | Stock analysis horizons: any combination of `1m`, `3m`, `6m`, and `12m`. |
-| `--period` | Historical price period for technical analysis; default `5y`. |
-| `--interval` | Historical price interval; default `1d`. |
-| `--price` / `--no-price` | Enable or disable automatic historical price retrieval. |
-| `--visual` | Generate and open a readable HTML stock dashboard with plain-language summaries, price charts, and expandable valuation, business, technical, and data-quality details. Requires historical price data; stocks only. |
-| `--json` | Save JSON output. |
-| `--output-dir`, `-o` | Directory for JSON and debug HTML output; default is the current directory. |
-| `--cache` / `--no-cache` | Enable or disable in-memory caching. |
-| `--timeout` | HTTP timeout in seconds; default `15`. |
-| `--retries` | Number of HTTP retries; default `3`. |
-| `--workers` | Maximum parallel stock-section requests; default `6`. |
-| `--debug-html` | Save fetched HTML pages for parser debugging. |
-| `--compact` | Use a more compact stock report layout without hiding report content. |
-| `--verbose`, `-v` | Enable detailed logging. |
-
-Stock section names include `overview`, `company`, `financials`,
-`income_statement`, `balance_sheet`, `cash_flow`, `ratios`,
-`financial_metrics`, `forecast`, `ratings`, `statistics`, `market_cap`,
-`revenue`, `dividends`, `business_metrics`, `revenue_by_segment`,
-`gross_profit_by_type`, `gross_margin_by_type`, `revenue_by_geography`, and
-`operating_expense_breakdown`.
-
-ETF sections include `overview`, `performance`, `holdings`, `sectors`,
-`countries`, `dividends`, and `news`.
-
-With the default stock section selection, MOMO discovers the business-metric
-detail pages available for that ticker. Supplying `--sections` requests only
-the selected stock sections. This option controls data retrieval, not terminal
-report layout: the stock CLI still displays its summarized report rather than
-printing each requested section in full. To inspect the fetched section data,
-use `--json` and open `momo_<ticker>_stock.json` in the output directory. For
-example, statement data is nested under `financials.incomeStatement` and
-`financials.balanceSheet`.
-
-When `--json` is used for a stock, output files include
-`momo_<ticker>_stock.json`, `momo_<ticker>_analysis.json`, and
-`momo_<ticker>_report.json`. For example:
-
-```text
-output/
-  momo_aapl_stock.json
-  momo_aapl_analysis.json
-  momo_aapl_report.json
-```
-
-With `--visual`, MOMO writes `momo_<ticker>_visual.html` to the current
-directory or the directory supplied with `--output-dir`, then opens it in the
-default browser. The self-contained dashboard includes candlesticks, moving
-averages, Bollinger Bands, support/resistance, volume, RSI, MACD, and
-multi-timeframe projections.
-
-### Stock analysis timeframes
-
-Technical and fundamental weights vary by horizon:
-
-| Key | Approximate horizon | Technical weight | Fundamental weight |
-| --- | ---: | ---: | ---: |
-| `1m` | 21 trading days | 80% | 20% |
-| `3m` | 63 trading days | 65% | 35% |
-| `6m` | 126 trading days | 45% | 55% |
-| `12m` | 252 trading days | 25% | 75% |
-
-Technical indicators are recalculated for each timeframe. Available analysis
-includes moving averages, RSI, MACD, Stochastic, Bollinger Bands, ATR, VWAP,
-OBV, Ichimoku, volatility, trend regression, and support/resistance levels.
-
-## Python API usage
-
-Install the package into the active environment with
-`python -m pip install -e ".[analysis]"` for stock analysis. Data collection
-and parsing use the core dependencies; running the command-line interface also
-requires the `cli` extra.
-
-### Quick start
-
-Module-level functions are convenient for one-off requests:
-
-```python
-import momo
-
-stock = momo.get_stock_data("AAPL")
-print(stock["ticker"])
-print(stock["quote"])
-
-report = momo.analyze_stock("AAPL", timeframes=["1m", "6m", "12m"])
-summary = report["executiveSummary"]
-print(summary["stance"], summary["overallScore"])
-print(report["fairValue"]["fundamental"])
-for horizon, outlook in report["timeframes"].items():
-    print(horizon, outlook["stance"], outlook["fairValue"]["base"])
-
-etf = momo.get_etf_data("VOO")
-print(etf["profile"])
-```
-
-`analyze_stock` fetches stock data and runs the integrated analysis. To analyze
-an existing payload instead, use `analyze_stock_data`:
-
-```python
-import momo
-
-stock = momo.get_stock_data("MSFT")
-report = momo.analyze_stock_data(
-    stock,
-    auto_fetch_price=False,
-    timeframes=["1m", "3m", "6m", "12m"],
-)
-```
-
-Set `auto_fetch_price=False` when you do not want MOMO to retrieve historical
-prices. Fundamental analysis remains available, while technical results need
-price data.
-
-### Reuse a client and configure requests
-
-Use `Momo` for workflows that make multiple requests. It manages the HTTP
-session and per-client cache; the context manager closes the session
-automatically.
+### Use the Python API
 
 ```python
 from momo import Momo, MomoConfig
 
-config = MomoConfig(
-    timeout=30,
-    max_retries=3,
-    use_cache=True,
-    max_workers=4,
-)
+with Momo(config=MomoConfig(timeout=20, max_retries=3)) as momo:
+    stock = momo.Stock("NVDA")
+    overview = stock.get_overview()
+    full_stock_data = stock.get_data()
 
-with Momo(config=config) as client:
-    stock = client.get_stock_data("AAPL")
-    report = client.analyze_stock_data(stock)
+    stocks = momo.Stocks("NVDA", "MSFT", "GOOGL")
+    comparison = stocks.compare()
 ```
 
-`Momo` also accepts configuration overrides directly:
+The client owns the shared HTTP session and cache; use it as a context manager so it closes cleanly. See the [Python API guide](docs/guides/python-api.md) for ETF, batch, and technical-analysis examples.
+
+## Development update log
+
+### 3.1.7a0
+
+- Added an object-oriented Python API for stocks, ETFs, and ticker batches.
+- Added `python -m momo` as the supported module entry point.
+- Replaced single-purpose convenience modules with shared `Momo` client workflows.
+- Added first-class valuation helpers and structured stock/ETF result contracts.
+- Added ticker normalization and provider-symbol resolution.
+- Added circuit breaking, host-level throttling, bounded I/O, retry cooldowns, and partial-run summaries.
+- Added cache copy isolation, cache size limits, stale-cache behavior, and atomic JSON writes.
+- Added structured logging, metrics, lifecycle and closed-client errors, and logging contexts.
+- Added dependency upper bounds, a dependency lock file, strict test markers, and CI coverage.
+- Added offline tests for parser behavior, valuation, normalization, networking, caching, CLI entry points, and batch operations.
+
+## API migration from 3.1.6
+
+Version 3.1.7a0 changes the recommended Python API from module-level convenience functions to reusable `Momo` objects. `src/momo/api.py` and the module-level helper exports from 3.1.6 are not part of the 3.1.7a0 public API.
+
+The new API creates assets and batches through a context-managed client:
 
 ```python
-with Momo(timeout=30, max_workers=4, use_cache=False) as client:
-    overview = client.get_stock_overview("AAPL")
+from momo import Momo, MomoConfig
+
+with Momo(config=MomoConfig(timeout=20, max_retries=3)) as momo:
+    stock = momo.Stock("NVDA")
+    overview = stock.get_overview()
+    full_stock_data = stock.get_data()
+
+    stocks = momo.Stocks("NVDA", "MSFT", "GOOGL")
+    comparison = stocks.compare()
 ```
 
-`MomoConfig` supports URL bases, request headers, timeout, retries and retry
-backoff, cache settings, worker count, and a debug-output directory.
+Replace common 3.1.6 calls as follows:
 
-### Data retrieval APIs
-
-The public module-level API provides:
-
-| Purpose | Functions |
+| 3.1.6 module-level call | 3.1.7a0 equivalent |
 | --- | --- |
-| ETF data | `get_overview`, `get_holdings`, `get_dividends`, `get_news`, `get_etf_data` |
-| Unified entry point | `get_data(ticker, asset_type="etf" or "stock")` |
-| Stock data | `get_stock_section`, `get_stock_data`, `get_stock_overview`, `get_stock_company`, `get_stock_financials`, `get_stock_statistics`, `get_stock_forecast`, `get_stock_ratings`, `get_stock_market_cap`, `get_stock_revenue`, `get_stock_dividends`, `get_stock_business_metrics` |
-| Analysis | `analyze_stock`, `analyze_stock_data` |
-| Comparisons | `compare` for ETFs, `compare_stocks` for stocks |
+| `momo.get_stock_data("AAPL", sections=...)` | `momo.Momo().Stock("AAPL").get_data()` or `momo.Momo().get_stock_data("AAPL", sections=...)` |
+| `momo.get_stock_overview("AAPL")` | `with momo.Momo() as client: client.Stock("AAPL").get_overview()` |
+| `momo.get_stock_section("AAPL", "financials")` | `client.Stock("AAPL").get_section("financials")` |
+| `momo.get_stock_company("AAPL")` | `client.Stock("AAPL").get_company()` |
+| `momo.get_stock_financials("AAPL")` | `client.Stock("AAPL").get_financials()` |
+| `momo.get_stock_forecast("AAPL")` | `client.Stock("AAPL").get_forecast()` |
+| `momo.get_stock_statistics("AAPL")` | `client.Stock("AAPL").get_statistics()` |
+| `momo.compare_stocks(["AAPL", "MSFT"])` | `client.Stocks("AAPL", "MSFT").compare()` |
+| `momo.get_overview("VOO")` | `client.ETF("VOO").get_overview()` |
+| `momo.get_holdings("VOO")` | `client.ETF("VOO").get_holdings()` |
+| `momo.get_etf_data("VOO")` | `client.ETF("VOO").get_data()` |
+| `momo.compare(["VOO", "QQQ"])` | `client.ETFs("VOO", "QQQ").compare()` |
+| `momo.analyze_stock("AAPL", ...)` | `client.analyze_stock("AAPL", ...)` or `client.Technical("AAPL", ...)` |
 
-For example, retrieve only selected sections:
-
-```python
-import momo
-
-stock = momo.get_stock_data(
-    "NVDA",
-    sections=["overview", "financials", "forecast", "ratings"],
-)
-income_statement = momo.get_stock_section("NVDA", "income_statement")
-print(income_statement.keys())
-```
-
-With `sections=None` (the default), the stock data workflow requests the
-standard sections and discovers available metric-detail pages. Providing an
-explicit section list limits the request to those sections.
-
-Selected stock data is assembled into a nested payload. For example, the
-income statement is available at `stock["financials"]["incomeStatement"]`:
+For direct section and data access, the underlying `Momo` methods remain available:
 
 ```python
-import momo
+from momo import Momo
 
-stock = momo.get_stock_data(
-    "AAPL",
-    sections=["overview", "income_statement", "balance_sheet"],
-)
-
-income = (stock.get("financials") or {}).get("incomeStatement") or {}
-for row in (income.get("rows") or [])[:5]:
-    print(row.get("datekey"), row)
+with Momo() as client:
+    overview = client.get_stock_overview("AAPL")
+    financials = client.get_stock_financials("AAPL")
+    stock_data = client.get_stock_data("AAPL")
+    etf_data = client.get_etf_data("VOO")
 ```
 
-The unified `get_data` function can fetch either asset type. `sections` applies
-only to stocks:
+Always use `Momo` as a context manager when it manages a complete workflow, and call `close()` explicitly when not using the context manager. Calls made after `close()` raise `MomoClosedError`. This release also adds `ProviderNetworkError`, `RateLimitError`, `SchemaMismatchError`, `DataValidationError`, `resolve_ticker`, `get_metrics`, `logging_context`, and typed asset/batch classes.
 
-```python
-import momo
+## Configuration
 
-stock = momo.get_data(
-    "MSFT",
-    asset_type="stock",
-    sections=["overview", "financials"],
-)
-etf = momo.get_data("VOO")  # ETF is the default asset type
+There are no project-specific environment variables documented in the codebase. Configure the Python client with `MomoConfig`, or use the corresponding CLI options:
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `timeout` / `--timeout` | `15` seconds | Network request timeout. |
+| `max_retries` / `--retries` | `3` | HTTP retry count. |
+| `max_workers` / `--workers` | `6` | Maximum parallel section-fetch workers; the effective limit is also bounded by host CPU count. |
+| `use_cache` / `--cache` | `True` | Enable the in-memory cache. |
+| `cache_ttl` | `300` seconds | Python API cache lifetime. |
+| `debug_dir` / `--output-dir` | current directory | Base directory for CLI output and debug HTML. |
+
+For provider URL restrictions, validation bounds, and the full settings list, see [Configuration reference](docs/reference/configuration.md).
+
+## Documentation
+
+### Getting started
+
+- [Installation](docs/getting-started/installation.md) — install package extras and handle analysis dependencies.
+
+### Guides
+
+- [CLI guide](docs/guides/cli.md) — select modes, sections, output, and analysis options.
+- [Python API guide](docs/guides/python-api.md) — fetch stock and ETF data with reusable clients.
+
+### Architecture and concepts
+
+- [Architecture](docs/architecture/overview.md) — follow a request through fetch, parsing, assembly, and presentation.
+- [ADR 0001: Parser and fetch orchestration](docs/architecture/adr/0001-parser-orchestration.md) — understand the accepted orchestration decision.
+
+### Reference
+
+- [Configuration](docs/reference/configuration.md) — review `MomoConfig` values, defaults, and bounds.
+- [Provider contracts](docs/reference/provider-contracts.md) — understand provider behavior, result shapes, and symbol resolution.
+
+### Operations
+
+- [Runbook](docs/operations/runbook.md) — diagnose incomplete runs and inspect generated summaries.
+- [Release and rollback](docs/operations/release.md) — follow the repository's CI-backed build and recovery steps.
+
+## Development and contributing
+
+Install the project's test dependencies and run the test suite:
+
+```powershell
+py -m pip install -c requirements.lock -e ".[analysis,cli,test]"
+py -m pytest -q
 ```
 
-### ETF data and comparisons
+The CI workflow also compiles the source and runs coverage-enabled tests. No lint command or contributor submission policy is defined in the repository; [TODO: document the preferred lint tool and contribution workflow].
 
-Retrieve ETF holdings and dividend data from the assembled payload, or fetch
-one component when you do not need the complete result:
-
-```python
-import momo
-
-etf = momo.get_etf_data("VOO")
-holdings = (etf.get("holdings") or {}).get("topHoldings") or []
-for holding in holdings[:5]:
-    print(holding)
-
-dividend_data = momo.get_dividends("VOO")
-print(dividend_data.get("metrics"))
-```
-
-Fetch several tickers with `compare_stocks` or `compare`. These return one
-payload per ticker in the same order as the input:
-
-```python
-import momo
-
-stocks = momo.compare_stocks(
-    ["AAPL", "MSFT", "NVDA"],
-    sections=["overview", "financials", "forecast"],
-)
-for stock in stocks:
-    print(stock["ticker"], stock.get("errors", []))
-
-etfs = momo.compare(["VOO", "QQQ", "SCHD"])
-for etf in etfs:
-    print(etf["ticker"], (etf.get("profile") or {}).get("name"))
-```
-
-Use `dump_json=True` to write a data payload to JSON. `dump_path` can specify
-the destination path:
-
-```python
-from pathlib import Path
-import momo
-
-stock = momo.get_stock_data(
-    "AAPL",
-    dump_json=True,
-    dump_path=Path("output/aapl.json"),
-)
-```
-
-### Analysis options and results
-
-`analyze_stock` and `analyze_stock_data` accept `price_data`, `period`,
-`interval`, `auto_fetch_price`, and `timeframes`. `analyze_stock` also accepts
-`sections` to limit the stock data fetch. For example, pass your own
-pandas-compatible OHLCV data and disable automatic price retrieval:
-
-```python
-import pandas as pd
-import momo
-
-stock = momo.get_stock_data("AAPL")
-prices = pd.read_csv("aapl_ohlcv.csv", index_col=0, parse_dates=True)
-report = momo.analyze_stock_data(
-    stock,
-    price_data=prices,
-    auto_fetch_price=False,
-)
-```
-
-An integrated analysis result includes:
-
-- `executiveSummary` and `professionalReport`
-- `timeframes`, with technical and blended results for each requested horizon
-- `fairValue`, with fundamental, technical-reference, and blended estimates
-- `fundamental`, including quality, business context, valuation methods, and consensus
-- `technical`, with per-timeframe indicators and state
-- `catalysts`, `risks`, `methodology`, and `disclaimer`
-
-Values depend on source-data availability. Missing source data is not treated
-as a zero-valued metric.
-
-### Offline HTML parsing
-
-Parse saved pages without making a network request:
-
-```python
-from pathlib import Path
-import momo
-
-stock = momo.parse_stock_directory(Path("downloaded_html"), ticker="AAPL")
-# Or parse a mapping of section names to HTML strings:
-stock = momo.parse_stock_snapshot({
-    "overview": Path("downloaded_html/overview.html").read_text(encoding="utf-8"),
-})
-```
-
-Parser helpers are also exported for individual ETF and stock page types,
-including `parse_stock_section_html`, `parse_stock_overview_html`,
-`parse_stock_financial_statement_html`, `parse_stock_forecast_html`,
-`parse_stock_business_metrics_html`, and `parse_stock_metric_detail_html`.
-
-### Legacy analysis API
-
-The legacy technical analyzer remains available:
-
-```python
-from momo.engine import StockAnalyzer
-
-result, dataframe = StockAnalyzer("AAPL").analyze_all()
-print(result["Trend"])
-print(result["RSI (14)"])
-```
-
-## Data sources and limitations
-
-- Fundamentals, company data, and ETF pages are parsed from
-  StockAnalysis.com.
-- Historical stock prices are fetched through yfinance when automatic price
-  retrieval is enabled.
-- Sections may be unavailable for some tickers. MOMO reports available
-  sections and source errors in the returned payload rather than implying
-  missing data is zero.
-- Valuation methods use estimates and fallback assumptions when inputs are
-  incomplete. Review the report's confidence and methodology alongside the
-  results.
-- Results are for informational and research purposes only, not investment
-  advice.
-
-## Project layout
-
-```text
-pyproject.toml
-requirements.txt
-main.py
-interface/            Rich/Typer CLI and report rendering
-src/momo/
-  api.py              Module-level convenience functions
-  client.py           HTTP client, caching, fetching, and JSON output
-  core/               Configuration, exceptions, validation, HTTP, cache
-  extractors/         Embedded-page extraction and normalization
-  parsers/             ETF and stock page parsers
-  assemblers/          Stable ETF and stock payload schemas
-  engine/              Optional technical, fundamental, and report analysis
-```
+Momo is released under the [Unlicense](LICENSE).

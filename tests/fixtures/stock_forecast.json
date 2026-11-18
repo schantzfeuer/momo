@@ -1,0 +1,11 @@
+{
+  "estimates": {
+    "stats": {
+      "annual": {
+        "revenueNext": {"growth": "10.81%"},
+        "epsNext": {"growth": 0.1081, "this": "7.25"}
+      }
+    }
+  },
+  "priceTargets": {"avg": "250", "low": "220", "high": "280", "numPriceTargets": "35"}
+}

@@ -157,7 +157,7 @@ def standardize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     out.attrs = inherited_attrs
     return out
 
-def fetch_yahoo_history(ticker: str, period: str = "5y", interval: str = "1d") -> pd.DataFrame:
+def fetch_yahoo_history(ticker: str, period: str = "10y", interval: str = "1d") -> pd.DataFrame:
     """Fetch validated OHLCV with two yfinance retrieval paths and provenance metadata."""
     try:
         import yfinance as yf  # type: ignore

@@ -1,9 +1,17 @@
 from __future__ import annotations
+import warnings
 from typing import Any, Dict, Optional
 import pandas as pd
 from .indicators import _support_resistance, compute_indicators
 from .market_data import fetch_yahoo_history, standardize_ohlcv
 from .technical import DEFAULT_TIMEFRAMES, analyze_technical_timeframe
+
+warnings.warn(
+    "momo.engine.legacy.StockAnalyzer is deprecated; use "
+    "momo.engine.ProfessionalStockAnalyzer or Momo.analyze_stock instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 class StockAnalyzer:
     """Compatibility layer for the legacy technical.py API and new engine.

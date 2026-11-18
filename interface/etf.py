@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import webbrowser
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -76,6 +77,8 @@ from .common import (
     _pct,
     _style_for_number,
 )
+from .visual import _money, etf_visual_filename, write_etf_visual_report
+from .view_models import assets_under_management as _assets_under_management
 
 ETF_DASHBOARD_REVISION = "r3-2026.08.22"
 ETF_SECTIONS = ["overview", "performance", "holdings", "sectors", "countries", "dividends", "news"]
@@ -218,7 +221,7 @@ def _etf_breakdown_panel(data: Mapping[str, Any], key: str, title: str, color: s
 
 
 def _etf_breakdown_rows(items: Sequence[Any], max_rows: int = 10) -> List[Tuple[str, str]]:
-    """Normalize sector/country rows without assuming one StockAnalysis schema."""
+    """Normalize sector/country rows without assuming one response layout."""
     rows: List[Tuple[str, str]] = []
     for item in list(items or [])[:max_rows]:
         if not isinstance(item, Mapping):
@@ -354,7 +357,7 @@ def _etf_kpi_panel(data: Mapping[str, Any]) -> Panel:
     metrics = dividends.get("metrics") or {}
 
     fields = [
-        ("AUM", profile.get("aum"), PALETTE["info"]),
+        ("AUM", _money(_assets_under_management(data), compact=True), PALETTE["info"]),
         ("EXPENSE", profile.get("expenseRatio"), "bright_magenta"),
         ("DIV YIELD", dividends.get("yield"), PALETTE["good"]),
         ("52W HIGH", quote.get("week52High"), PALETTE["good"]),
@@ -388,22 +391,28 @@ def _etf_news_panel(data: Mapping[str, Any]) -> Panel:
 def _etf_performance_panel(data: Mapping[str, Any]) -> Panel:
     perf = _deep_get(data, "performance", "totalReturn", default={}) or {}
     labels = {
-        "tr1m": "1M",
-        "trYTD": "YTD",
-        "tr1y": "1Y",
+        "tr1m": "1 Month",
+        "1m": "1 Month",
+        "trytd": "Year-to-Date",
+        "ytd": "Year-to-Date",
+        "tr1y": "1 Year",
         "tr3y": "CAGR 3Y",
-        "tr5y": "CAGR 5Y",
-        "tr10y": "CAGR 10Y",
-        "trMax": "CAGR MAX",
-        "trmax": "CAGR MAX",
+        "tr5y": "5 Years CAGR",
+        "cagr5y": "5 Years CAGR",
+        "tr10y": "10 Years CAGR",
+        "cagr10y": "10 Years CAGR",
+        "trmax": "CAGR Since Inception",
+        "cagrmax": "CAGR Since Inception",
+        "max": "CAGR Since Inception",
     }
     table = Table(box=None, expand=True, padding=(0, 1), show_header=False)
     table.add_column(style="bright_blue")
     table.add_column(justify="right")
     if isinstance(perf, Mapping):
         for key, value in perf.items():
+            normalized_key = str(key).lower()
             table.add_row(
-                labels.get(str(key), str(key)),
+                labels.get(normalized_key, labels.get(str(key), str(key))),
                 Text(_pct(value), style=_style_for_number(value)),
             )
     return Panel(table, title="Performance", box=box.SQUARE, border_style=PALETTE["good"], padding=(0, 0))
@@ -426,12 +435,13 @@ def fetch_etf_targeted(
     ticker: str,
     sections: Sequence[str],
 ) -> Dict[str, Any]:
+    etf = client.ETF(ticker)
     needed_pages: set[str] = set()
     for section in sections:
         needed_pages |= ETF_PAGES_FOR_SECTION.get(section, set())
 
     if needed_pages >= {"overview", "holdings", "dividends"}:
-        return client.get_etf_data(ticker)
+        return etf.get_data()
 
     overview: Dict[str, Any] = {}
     holdings: Dict[str, Any] = {}
@@ -440,17 +450,17 @@ def fetch_etf_targeted(
 
     if "overview" in needed_pages:
         try:
-            overview = client.get_overview(ticker)
+            overview = etf.get_overview()
         except MomoError as exc:
             errors.append({"section": "overview", "error": str(exc)})
     if "holdings" in needed_pages:
         try:
-            holdings = client.get_holdings(ticker)
+            holdings = etf.get_holdings()
         except MomoError as exc:
             errors.append({"section": "holdings", "error": str(exc)})
     if "dividends" in needed_pages:
         try:
-            dividends = client.get_dividends(ticker)
+            dividends = etf.get_dividends()
         except MomoError as exc:
             errors.append({"section": "dividends", "error": str(exc)})
 
@@ -494,7 +504,8 @@ def render_etf_comparison(results: Sequence[Mapping[str, Any]]) -> None:
         table.add_row(
             _display(data.get("ticker")), _display(profile.get("name")), _display(quote.get("price")),
             _pct(perf.get("tr1m")), _pct(perf.get("trYTD")), _pct(perf.get("tr1y")),
-            _display(div.get("yield")), _display(profile.get("expenseRatio")), _display(profile.get("aum")),
+            _display(div.get("yield")), _display(profile.get("expenseRatio")),
+            _money(_assets_under_management(data), compact=True),
             _display(hold.get("totalHoldingsCount")),
         )
     console.print(Panel(table, title="🔀 Cross-ETF Comparison", border_style=PALETTE["brand"], box=box.ROUNDED))
@@ -538,10 +549,15 @@ def run_etf_pipeline(
     output_dir: Path,
     debug_html: bool,
     compare: bool,
+    visual: bool = False,
+    period: str = "5y",
+    interval: str = "1d",
+    use_price: bool = True,
 ) -> int:
     started = time.monotonic()
     results: List[Dict[str, Any]] = []
     failures: List[Tuple[str, str]] = []
+    visual_reports: List[Path] = []
 
     progress = Progress(
         SpinnerColumn(style=PALETTE["info"]),
@@ -562,6 +578,23 @@ def run_etf_pipeline(
                 try:
                     progress.update(task, description="fetching ETF data")
                     data = fetch_etf_targeted(client, ticker, sections)
+                    price_data = None
+                    technical: Dict[str, Any] = {"available": False, "reason": "Historical prices were not requested.", "timeframes": {}}
+                    if visual:
+                        data = client.ETF(ticker).get_data()
+                        if use_price:
+                            try:
+                                from momo.engine.market_data import fetch_yahoo_history
+                                price_data = fetch_yahoo_history(ticker, period=period, interval=interval)
+                                technical = client.Technical(
+                                    ticker, price_data=price_data, auto_fetch_price=False,
+                                    timeframes=("1m", "3m", "6m", "12m"),
+                                )
+                            except (ImportError, MomoError, ValueError) as exc:
+                                technical = {"available": False, "reason": str(exc), "timeframes": {}}
+                        visual_path = output_dir / etf_visual_filename(ticker)
+                        write_etf_visual_report(ticker, data, visual_path, price_data, technical)
+                        visual_reports.append(visual_path)
                     progress.advance(task)
                     if dump_json:
                         progress.update(task, description="writing JSON")
@@ -578,6 +611,15 @@ def run_etf_pipeline(
                     progress.update(task, description="failed", completed=2)
 
     elapsed = time.monotonic() - started
+    for visual_path in visual_reports:
+        try:
+            opened = webbrowser.open(visual_path.resolve().as_uri(), new=2)
+        except OSError:
+            opened = False
+        console.print(
+            f"[{PALETTE['good'] if opened else PALETTE['info']}]ETF dashboard "
+            f"{'opened' if opened else 'saved'}:[/] {visual_path}"
+        )
     if compare and results:
         render_etf_comparison(results)
     else:
@@ -603,4 +645,13 @@ def run_etf_pipeline(
             table.add_row(ticker, reason)
         console.print(Panel(table, title="❌ Failed Tickers", border_style=PALETTE["bad"], box=box.ROUNDED))
 
+    run_summary = {
+        "assetType": "etf",
+        "exitReason": "ok" if results and not failures else ("partial" if results else "failed"),
+        "attempted": list(tickers),
+        "available": [data.get("ticker") for data in results],
+        "failed": {ticker: reason for ticker, reason in failures},
+        "providerLatencyMs": {},
+    }
+    _json_dump(output_dir / "momo_run_summary.json", run_summary)
     return 0 if results else 1

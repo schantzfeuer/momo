@@ -58,6 +58,7 @@ from momo import (
     enable_logging,
     __version__ as MOMO_VERSION,
 )
+from momo.core.units import normalize_financial
 
 try:
     from momo.engine import __version__ as TECHNICAL_VERSION
@@ -95,25 +96,7 @@ def _display(value: Any, fallback: str = "—") -> str:
 
 
 def _num(value: Any) -> Optional[float]:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        try:
-            return float(value)
-        except Exception:
-            return None
-    text = str(value).strip().replace(",", "").replace("$", "").replace("%", "")
-    if not text or text.lower() in {"none", "nan", "n/a", "—"}:
-        return None
-    multipliers = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
-    suffix = text[-1:].upper()
-    mult = multipliers.get(suffix, 1.0)
-    if suffix in multipliers:
-        text = text[:-1]
-    try:
-        return float(text) * mult
-    except ValueError:
-        return None
+    return normalize_financial(value).value
 
 
 def _money(value: Any, decimals: int = 2) -> str:
@@ -174,8 +157,15 @@ def _normalize_tickers(tickers: Sequence[str]) -> List[str]:
     for raw in tickers:
         for token in str(raw).replace(",", " ").split():
             token = token.strip().upper()
-            if token and token not in output:
-                output.append(token)
+            if not token:
+                continue
+            try:
+                from momo.core.validation import validate_ticker
+                canonical = validate_ticker(token)
+            except MomoValidationError:
+                continue
+            if canonical not in output:
+                output.append(canonical)
     return output
 
 
@@ -197,9 +187,8 @@ def _deep_get(mapping: Mapping[str, Any], *keys: str, default: Any = None) -> An
 
 
 def _json_dump(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, ensure_ascii=False, default=str)
+    from momo.core.persistence import atomic_json_write
+    atomic_json_write(Path(path), payload, default=str)
 
 
 def _company_label(profile: Mapping[str, Any]) -> str:

@@ -5,6 +5,15 @@ import math
 import re
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
+from momo.core.units import parse_number
+from .view_models import (
+    assets_under_management as _assets_under_management,
+    number as _number,
+    format_price as _format_price,
+    format_date as _format_date,
+    prepare_prices as _prepare_prices,
+)
+from .rendering import escape as _escape, detail_block as _detail_block, table as _table
 
 
 _COLORS = {
@@ -32,14 +41,6 @@ def _pandas_module() -> Any:
     return pd
 
 
-def _number(value: Any) -> Optional[float]:
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return None
-    return result if math.isfinite(result) else None
-
-
 def _series_path(values: Sequence[Optional[float]], xs: Sequence[float], y_for: Any) -> str:
     points = []
     for x, value in zip(xs, values):
@@ -48,63 +49,7 @@ def _series_path(values: Sequence[Optional[float]], xs: Sequence[float], y_for: 
     return " ".join(points)
 
 
-def _format_price(value: Any) -> str:
-    number = _number(value)
-    return f"{number:,.2f}" if number is not None else "—"
-
-
-def _format_date(value: Any) -> str:
-    if value is None:
-        return "Not available"
-    pd = _pandas_module()
-    try:
-        return pd.Timestamp(value).strftime("%b %d, %Y")
-    except (TypeError, ValueError):
-        return str(value)
-
-
-def _prepare_prices(price_data: Any) -> pd.DataFrame:
-    pd = _pandas_module()
-    if not isinstance(price_data, pd.DataFrame) or price_data.empty:
-        raise ValueError("Historical OHLCV is unavailable; a chart cannot be generated.")
-    frame = price_data.copy()
-    frame.columns = [str(column).strip().title() for column in frame.columns]
-    required = {"Open", "High", "Low", "Close"}
-    if not required.issubset(frame.columns):
-        raise ValueError("Historical price data is missing OHLC columns.")
-    if "Volume" not in frame.columns:
-        frame["Volume"] = 0.0
-    frame = frame.dropna(subset=["Open", "High", "Low", "Close"]).sort_index()
-    if frame.empty:
-        raise ValueError("Historical price data has no complete OHLC rows.")
-    for column in ["Open", "High", "Low", "Close", "Volume"]:
-        frame[column] = pd.to_numeric(frame[column], errors="coerce")
-    frame = frame.dropna(subset=["Open", "High", "Low", "Close"])
-    close = frame["Close"]
-    for window in (20, 50, 200):
-        frame[f"SMA{window}"] = close.rolling(
-            window,
-            min_periods=max(5, int(round(window * 0.60))),
-        ).mean()
-    frame["BBMiddle"] = close.rolling(20, min_periods=5).mean()
-    deviation = close.rolling(20, min_periods=5).std(ddof=0)
-    frame["BBUpper"] = frame["BBMiddle"] + 2.0 * deviation
-    frame["BBLower"] = frame["BBMiddle"] - 2.0 * deviation
-
-    delta = close.diff()
-    average_gain = delta.clip(lower=0).ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
-    average_loss = -delta.clip(upper=0).ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
-    relative_strength = average_gain / average_loss.replace(0, float("nan"))
-    frame["RSI"] = (100.0 - 100.0 / (1.0 + relative_strength)).fillna(50.0)
-
-    macd = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
-    frame["MACD"] = macd
-    frame["MACDSignal"] = macd.ewm(span=9, adjust=False).mean()
-    frame["MACDHist"] = frame["MACD"] - frame["MACDSignal"]
-    return frame.tail(252)
-
-
-def _build_chart(frame: pd.DataFrame, levels: Mapping[str, Any]) -> str:
+def _build_chart(frame: Any, levels: Mapping[str, Any]) -> str:
     pd = _pandas_module()
     width = 1360
     left, right = 82.0, 1320.0
@@ -255,10 +200,6 @@ def _build_chart(frame: pd.DataFrame, levels: Mapping[str, Any]) -> str:
     return "\n".join(svg)
 
 
-def _escape(value: Any) -> str:
-    return html.escape(str(value))
-
-
 def _money(value: Any, compact: bool = False) -> str:
     number = _number(value)
     if number is None:
@@ -275,6 +216,16 @@ def _money(value: Any, compact: bool = False) -> str:
     return f"{sign}${number:,.2f}"
 
 
+def _financial_value(value: Any, compact: bool = False) -> str:
+    number = _number(value)
+    if number is not None:
+        return _money(number, compact=compact)
+    text = str(value).strip()
+    if re.fullmatch(r"-?[\d,]+(?:\.\d+)?[TMBK]", text, re.IGNORECASE):
+        return f"${text}"
+    return text or "Not available"
+
+
 def _percent(value: Any, signed: bool = False, fraction: bool = False) -> str:
     number = _number(value)
     if number is None:
@@ -285,23 +236,18 @@ def _percent(value: Any, signed: bool = False, fraction: bool = False) -> str:
     return f"{sign}{number:.1f}%"
 
 
-def _detail_block(title: str, content: str, note: str = "") -> str:
-    safe_note = f'<span class="detail-note">{_escape(note)}</span>' if note else ""
-    return (
-        '<details class="detail-block">'
-        f"<summary>{_escape(title)}{safe_note}</summary>"
-        f'<div class="detail-content">{content}</div></details>'
-    )
-
-
-def _table(headers: Sequence[str], rows: Sequence[str], empty: str = "No data available.") -> str:
-    if not rows:
-        return f'<p class="muted">{_escape(empty)}</p>'
-    header_html = "".join(f"<th>{_escape(header)}</th>" for header in headers)
-    return (
-        '<div class="table-wrap"><table><thead><tr>'
-        f"{header_html}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
-    )
+def _fund_percent(value: Any, fraction: bool = False, decimals: int = 1) -> str:
+    if isinstance(value, str) and "%" in value:
+        number = _number(value.replace("%", "").strip())
+        if number is None:
+            return "Not available"
+        return f"{number:.{decimals}f}%"
+    number = _number(value)
+    if number is None:
+        return "Not available"
+    if fraction:
+        number *= 100
+    return f"{number:.{decimals}f}%"
 
 
 def _metric_card(label: str, value: str, note: str = "") -> str:
@@ -1040,25 +986,19 @@ def _data_quality_html(analysis: Mapping[str, Any]) -> str:
     )
     cards = [
         _metric_card("Overall confidence", f"{_format_price(quality.get('overallConfidence'))} / 100", quality.get("confidenceLabel") or ""),
-        _metric_card("Fundamental data coverage", _percent(input_quality.get("metricCoveragePct", quality.get("fundamentalMetricCoveragePct"))), "Core measures found in the source data"),
+        _metric_card("Fundamental data coverage", _percent(input_quality.get("metricCoveragePct", quality.get("fundamentalMetricCoveragePct"))), "Core measures found in available financial data"),
         _metric_card("Price history quality", _percent(price_quality.get("qualityScore")), f"{price_quality.get('rowCount', 'Not available')} observations"),
     ]
     sources = []
-    if context.get("source"):
-        sources.append(f'<span><strong>Fundamental source</strong>{_escape(context["source"])}</span>')
     if context.get("generatedAt"):
         sources.append(f'<span><strong>Data collected</strong>{_escape(_format_date(context["generatedAt"]))}</span>')
-    if analysis.get("engineVersion"):
-        sources.append(f'<span><strong>Analysis engine</strong>{_escape(analysis["engineVersion"])}</span>')
-    if context.get("parserVersion"):
-        sources.append(f'<span><strong>Parser version</strong>{_escape(context["parserVersion"])}</span>')
     source_errors = context.get("sourceErrors") or []
     errors_html = (
         "<ul class=\"story-list\">" + "".join(
-            f'<li><strong>{_escape(item.get("section") or "Source")}</strong>: {_escape(item.get("error") or "Could not retrieve data.")}</li>'
+            f'<li><strong>{_escape(str(item.get("section") or "Data").replace("_", " ").replace("-", " ").title())}</strong>: Data is unavailable.</li>'
             for item in source_errors
         ) + "</ul>"
-        if source_errors else '<p class="positive">No source errors were reported.</p>'
+        if source_errors else '<p class="positive">No data retrieval errors were reported.</p>'
     )
     warnings = list(quality.get("warnings") or []) + list(price_quality.get("warnings") or [])
     for timeframe in (technical.get("timeframes") or {}).values():
@@ -1104,12 +1044,12 @@ def _data_quality_html(analysis: Mapping[str, Any]) -> str:
         f'<span><strong>Rows used</strong>{_escape(price_quality.get("rowCount", "Not available"))}</span>'
         f'<span><strong>Sections available</strong>{len(sections)}</span>'
         f'<span><strong>Section coverage</strong>{_escape(_percent(context.get("sectionCoveragePct")))}</span>'
-        f'<span><strong>Source errors</strong>{_escape(context.get("sourceErrorCount", len(source_errors)))}</span></div>'
+        f'<span><strong>Data retrieval issues</strong>{_escape(context.get("sourceErrorCount", len(source_errors)))}</span></div>'
         f'<div class="source-facts">{"".join(sources)}</div>'
         f'{_detail_block("Fundamental input checks", fundamental_quality_detail)}'
         f'{_detail_block("Data sections used", f"<p><strong>Available:</strong> {_escape(section_list)}</p><p><strong>Requested:</strong> {_escape(requested_section_list)}</p>")}'
         f'{_detail_block("Warnings", warning_html)}'
-        f'{_detail_block("Source errors", errors_html)}'
+        f'{_detail_block("Data retrieval issues", errors_html)}'
         "</section>"
     )
 
@@ -1155,22 +1095,467 @@ def _analysis_results_html(
     analysis: Mapping[str, Any],
     chart: str,
     chart_details: str,
+    stock_data: Optional[Mapping[str, Any]] = None,
 ) -> str:
     return (
         '<nav class="analysis-nav" aria-label="Analysis sections">'
         '<a href="#summary">Summary</a><a href="#valuation">Valuation</a>'
-        '<a href="#business">Business fundamentals</a><a href="#technical">Technical detail</a>'
+        '<a href="#company-data">Company profile</a><a href="#business">Business fundamentals</a>'
+        '<a href="#technical">Technical detail</a><a href="#news">News</a>'
         '<a href="#quality">Data quality</a><a href="#methodology">Method &amp; limitations</a></nav>'
         + _overview_html(analysis)
         + '<section class="panel chart-panel"><h2>Price action, trend and momentum</h2>'
         + '<p class="muted">Candles show historical prices. The lines show common trend and volatility measures.</p>'
         + f'<div class="chart-wrap">{chart}</div></section>'
         + chart_details
+        + _source_data_html(stock_data or {}, "stock")
         + _valuation_html(analysis)
         + _fundamental_html(analysis)
         + _technical_html(analysis)
+        + _news_html(stock_data or {})
         + _data_quality_html(analysis)
         + _methodology_html(analysis)
+    )
+
+
+def _normalized_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+
+def _pick_value(sources: Sequence[Any], *keys: str) -> Any:
+    wanted = {_normalized_key(key) for key in keys}
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        for key, value in source.items():
+            if _normalized_key(key) in wanted and value not in (None, ""):
+                if isinstance(value, Mapping):
+                    value = next(
+                        (value.get(wrapper) for wrapper in ("value", "displayValue", "label", "name")
+                         if value.get(wrapper) not in (None, "")),
+                        value,
+                    )
+                return value
+    return None
+
+
+def _company_name(data: Mapping[str, Any], ticker: str) -> str:
+    company = data.get("company") or {}
+    return str(_pick_value(
+        (company.get("profile"), data.get("profile"), company.get("identity"),
+         data.get("identity"), (data.get("overview") or {}).get("identity")),
+        "nameFull", "companyName", "longName", "name", "shortName",
+    ) or ticker)
+
+
+def _period_label(row: Mapping[str, Any]) -> str:
+    value = _pick_value((row,), "datekey", "fiscalYear", "period", "date")
+    return str(value or "Latest")
+
+
+def _statement_html(financials: Mapping[str, Any]) -> str:
+    statement_specs = (
+        ("incomeStatement", "Income statement", (
+            ("Revenue", ("revenue", "totalRevenue")),
+            ("Cost of revenue", ("costOfRevenue", "costOfGoodsSold")),
+            ("Gross profit", ("grossProfit",)),
+            ("Research and development", ("researchAndDevelopment", "researchDevelopment")),
+            ("Selling, general and administrative", ("sellingGeneralAndAdministrative", "sgaExpense")),
+            ("Operating expenses", ("operatingExpenses",)),
+            ("Operating income", ("operatingIncome",)),
+            ("Interest expense", ("interestExpense",)),
+            ("Pretax income", ("pretaxIncome", "incomeBeforeTax")),
+            ("Income tax", ("incomeTaxExpense", "incomeTax")),
+            ("Net income", ("netIncome",)),
+            ("EBITDA", ("ebitda",)),
+            ("Earnings per share", ("eps", "epsdil", "earningsPerShare")),
+            ("Shares outstanding", ("sharesOutstanding", "weightedAverageShares")),
+        )),
+        ("balanceSheet", "Balance sheet", (
+            ("Total assets", ("totalAssets",)),
+            ("Current assets", ("currentAssets",)),
+            ("Cash and equivalents", ("cashAndCashEquivalents", "cash", "cashAndShortTermInvestments")),
+            ("Accounts receivable", ("accountsReceivable", "receivables")),
+            ("Inventory", ("inventory",)),
+            ("Property and equipment", ("propertyPlantEquipment", "netPpe")),
+            ("Current liabilities", ("currentLiabilities",)),
+            ("Accounts payable", ("accountsPayable",)),
+            ("Total liabilities", ("totalLiabilities",)),
+            ("Shareholders' equity", ("totalEquity", "stockholdersEquity")),
+            ("Total debt", ("totalDebt",)),
+            ("Long-term debt", ("longTermDebt",)),
+            ("Retained earnings", ("retainedEarnings",)),
+        )),
+        ("cashFlow", "Cash flow", (
+            ("Net income", ("netIncome",)),
+            ("Depreciation and amortization", ("depreciationAndAmortization", "depreciation")),
+            ("Stock-based compensation", ("stockBasedCompensation",)),
+            ("Change in working capital", ("changeInWorkingCapital",)),
+            ("Operating cash flow", ("operatingCashFlow", "cashFromOperatingActivities")),
+            ("Capital expenditures", ("capitalExpenditures",)),
+            ("Free cash flow", ("freeCashFlow",)),
+            ("Investing cash flow", ("investingCashFlow", "cashFromInvestingActivities")),
+            ("Financing cash flow", ("financingCashFlow", "cashFromFinancingActivities")),
+            ("Debt repaid", ("debtRepayment", "repaymentsOfDebt")),
+            ("Dividends paid", ("dividendsPaid", "cashDividendsPaid")),
+        )),
+    )
+    metadata_fields = {
+        "date", "datekey", "fiscalyear", "fiscalquarter", "period", "currency",
+        "symbol", "ticker", "reportdate", "calendaryear",
+    }
+
+    def normalized(value: Any) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+    def label_for(field: str, definitions: Sequence[Any]) -> str:
+        for definition in definitions:
+            if not isinstance(definition, Mapping):
+                continue
+            definition_id = _pick_value((definition,), "id", "key", "name")
+            if definition_id is not None and normalized(definition_id) == normalized(field):
+                title = _pick_value((definition,), "title", "label", "name")
+                if title:
+                    return str(title)
+        return re.sub(r"(?<!^)(?=[A-Z])", " ", field).replace("_", " ").strip().title()
+
+    panels = []
+    for key, title, metrics in statement_specs:
+        statement = financials.get(key) or {}
+        rows = statement.get("rows") if isinstance(statement, Mapping) else []
+        if not isinstance(rows, list):
+            rows = []
+        rows = [row for row in rows if isinstance(row, Mapping)]
+        rows.sort(key=_period_label, reverse=True)
+        rows = rows[:4]
+        if not rows:
+            continue
+        columns = [_period_label(row) for row in rows]
+        definitions = statement.get("rowDefinitions") or []
+        metric_rows = list(metrics)
+        used_fields = {normalized(alias) for _, aliases in metrics for alias in aliases}
+        row_fields = list(dict.fromkeys(field for row in rows for field in row))
+        for field in row_fields:
+            field_key = normalized(field)
+            if field_key in metadata_fields or field_key in used_fields:
+                continue
+            if not any(_number(row.get(field)) is not None for row in rows):
+                continue
+            metric_rows.append((label_for(str(field), definitions), (str(field),)))
+            used_fields.add(field_key)
+
+        table_rows = []
+        for label, aliases in metric_rows[:30]:
+            values = [_pick_value((row,), *aliases) for row in rows]
+            if not any(value is not None for value in values):
+                continue
+            rendered_values = []
+            for value in values:
+                if value is None:
+                    rendered_values.append("—")
+                    continue
+                metric_key = normalized(aliases[0])
+                number = _number(value)
+                if "margin" in metric_key or "growth" in metric_key or "yield" in metric_key or "ratio" in metric_key:
+                    displayed = _fund_percent(value, fraction=number is not None and abs(number) <= 1)
+                elif "shares" in metric_key:
+                    displayed = f"{number:,.0f}" if number is not None else str(value)
+                else:
+                    displayed = _money(value, compact=metric_key not in {"eps", "epsdil", "earningspershare"})
+                rendered_values.append(_escape(displayed))
+            table_rows.append(
+                f"<tr><td>{_escape(label)}</td>" + "".join(f"<td>{value}</td>" for value in rendered_values) + "</tr>"
+            )
+        if table_rows:
+            panels.append(
+                f'<div class="statement-panel" id="{_escape(key.replace("Statement", "-statements").replace("Sheet", "-sheet"))}"><h3>{_escape(title)}</h3>'
+                + _table(("Measure", *columns), table_rows)
+                + "</div>"
+            )
+    return "".join(panels) or '<p class="muted">Statement details are not available.</p>'
+
+
+def _company_information_html(data: Mapping[str, Any]) -> str:
+    company = data.get("company") or {}
+    overview = data.get("overview") or {}
+    profile = data.get("profile") or {}
+    identity = data.get("identity") or overview.get("identity") or {}
+    contact = company.get("contact") or {}
+    details = company.get("details") or {}
+    sources = (profile, company.get("profile"), identity, details, contact)
+    headquarters = _pick_value(sources, "address", "headquarters", "location", "city")
+    if isinstance(headquarters, Mapping):
+        headquarters = ", ".join(str(value) for value in (
+            _pick_value((headquarters,), "city"),
+            _pick_value((headquarters,), "state", "region"),
+            _pick_value((headquarters,), "country"),
+        ) if value)
+    facts = (
+        ("Sector", _pick_value(sources, "sector")),
+        ("Industry", _pick_value(sources, "industry")),
+        ("Employees", _pick_value(sources, "employees", "employeeCount", "fullTimeEmployees")),
+        ("Headquarters", headquarters),
+        ("Exchange", _pick_value(sources, "exchange")),
+        ("Founded", _pick_value(sources, "founded", "ipoDate")),
+    )
+    fact_cards = "".join(
+        _metric_card(
+            label,
+            f"{int(_number(value)):,}" if label == "Employees" and _number(value) is not None
+            else str(value),
+        )
+        for label, value in facts if value not in (None, "")
+    )
+    description = _pick_value(
+        (company, company.get("profile"), profile, overview),
+        "description", "businessSummary", "summary",
+    )
+    fundamentals = data.get("fundamentals") or overview.get("fundamentals") or {}
+    financial_facts = (
+        ("Market capitalization", ("marketCap",), True),
+        ("Annual revenue", ("revenue",), True),
+        ("Net income", ("netIncome",), True),
+        ("Earnings per share", ("eps",), False),
+        ("Price-to-earnings", ("peRatio", "pe"), False),
+    )
+    financial_cards = []
+    for label, aliases, compact in financial_facts:
+        value = _pick_value((fundamentals,), *aliases)
+        if value is not None:
+            formatted = _financial_value(value, compact=compact or label == "Earnings per share")
+            if label == "Price-to-earnings":
+                number = _number(value)
+                formatted = f"{number:.2f}×" if number is not None else f"{value}×"
+            financial_cards.append(_metric_card(label, formatted))
+    financials = data.get("financials") or {}
+    stats = (data.get("analysis") or {}).get("statistics") or {}
+    stat_rows = []
+    sections = stats.get("sections") or {}
+    stat_labels = {
+        "marketcap": "Market capitalization", "pe": "Price-to-earnings",
+        "peratio": "Price-to-earnings", "forwardpe": "Forward price-to-earnings",
+        "forwardperatio": "Forward price-to-earnings", "beta": "Beta",
+        "dividendyield": "Dividend yield", "profitmargin": "Profit margin",
+        "returnonequity": "Return on equity", "debttoequity": "Debt to equity",
+    }
+    if isinstance(sections, Mapping):
+        for section in sections.values():
+            items = section.get("items") or [] if isinstance(section, Mapping) else []
+            for item in items:
+                if not isinstance(item, Mapping):
+                    continue
+                key = _normalized_key(item.get("id") or item.get("name") or item.get("label"))
+                value = item.get("value")
+                if value is None or key not in stat_labels:
+                    continue
+                if key == "marketcap":
+                    displayed = _financial_value(value, compact=True)
+                elif key in {"dividendyield", "profitmargin", "returnonequity"}:
+                    displayed = _fund_percent(value, decimals=2)
+                elif key in {"pe", "peratio", "forwardpe", "forwardperatio"}:
+                    displayed = f"{_format_price(value)}×"
+                elif key == "beta":
+                    displayed = _format_price(value)
+                else:
+                    displayed = _financial_value(value)
+                stat_rows.append(f"<tr><td>{_escape(stat_labels[key])}</td><td>{_escape(displayed)}</td></tr>")
+                if len(stat_rows) == 8:
+                    break
+            if len(stat_rows) == 8:
+                break
+
+    forecast = (data.get("analysis") or {}).get("forecast") or {}
+    forecast_consensus = forecast.get("consensus") or {}
+    price_targets = forecast.get("priceTargets") or {}
+    consensus_rating = _pick_value((forecast_consensus,), "rating", "recommendation", "consensus")
+    analyst_count = _pick_value((forecast_consensus,), "numberOfAnalysts", "analystCount", "numAnalysts")
+    target_mean = _pick_value((price_targets, forecast_consensus), "targetMeanPrice", "averageTarget", "meanTarget", "targetMean", "priceTarget")
+    target_low = _pick_value((price_targets,), "targetLowPrice", "lowTarget", "targetLow", "low")
+    target_high = _pick_value((price_targets,), "targetHighPrice", "highTarget", "targetHigh", "high")
+    current_price = _pick_value(
+        (data.get("marketData") or {}, data.get("quote") or {}, data.get("fundamentals") or {}),
+        "currentPrice", "regularMarketPrice", "price",
+    )
+    forecast_cards = []
+    if consensus_rating is not None:
+        forecast_cards.append(_metric_card("Analyst consensus", str(consensus_rating), "Reported analyst recommendation"))
+    if analyst_count is not None:
+        forecast_cards.append(_metric_card("Analysts covering", str(analyst_count), "Count reported by the source"))
+    if target_mean is not None:
+        note = "Average analyst price target"
+        target_value = _number(target_mean)
+        price_value = _number(current_price)
+        if target_value is not None and price_value:
+            note += f" · {_percent((target_value / price_value - 1) * 100, signed=True)} vs. current price"
+        forecast_cards.append(_metric_card("Average price target", _money(target_mean), note))
+    if target_low is not None or target_high is not None:
+        forecast_cards.append(_metric_card(
+            "Analyst target range",
+            f"{_money(target_low)} – {_money(target_high)}",
+            "Lowest to highest reported target",
+        ))
+    ratings_data = (data.get("analysis") or {}).get("ratings") or {}
+    ratings = forecast.get("recentRatings") or ratings_data.get("ratings") or []
+    rating_rows = []
+    if isinstance(ratings, list):
+        for item in ratings[:5]:
+            if not isinstance(item, Mapping):
+                continue
+            firm = _pick_value((item,), "company", "analyst", "firm", "title") or "Analyst"
+            action = _pick_value((item,), "action", "rating", "grade") or "—"
+            date = _pick_value((item,), "date", "published")
+            if action is not None or date is not None:
+                rating_rows.append(
+                    f"<tr><td>{_escape(firm)}</td><td>{_escape(action)}</td><td>{_escape(date or '—')}</td></tr>"
+                )
+    forecast_html = (
+        f'<div class="grid insight-grid forecast-cards">{"".join(forecast_cards)}</div>'
+        if forecast_cards else '<p class="muted">Analyst consensus and price targets are not available.</p>'
+    )
+    forecast_html += (
+        '<h4 class="subheading">Recent analyst rating changes</h4>'
+        + _table(("Analyst or firm", "Action / rating", "Date"), rating_rows, "Recent analyst rating changes are not available.")
+    )
+
+    dividends = (data.get("market") or {}).get("dividends") or {}
+    dividend_metrics = dividends.get("metrics") or dividends.get("summary") or dividends
+    dividend_cards = []
+    for label, aliases, kind in (
+        ("Annual dividend yield", ("yield", "dividendYield"), "percent"),
+        ("Annual dividend per share", ("annualDividend", "dividend", "annualRate"), "money"),
+        ("Next ex-dividend date", ("exDividendDate", "exDate"), "text"),
+        ("Payout ratio", ("payoutRatio",), "percent"),
+    ):
+        value = _pick_value((dividend_metrics, dividends), *aliases)
+        if value is not None:
+            if kind == "percent":
+                number = _number(value)
+                display = _fund_percent(value, fraction=number is not None and abs(number) < 1)
+            elif kind == "money" and _number(value) is not None:
+                display = _money(value)
+            else:
+                display = str(value)
+            dividend_cards.append(_metric_card(label, display))
+    history = dividends.get("history") or dividends.get("recentHistory") or []
+    dividend_rows = []
+    if isinstance(history, list):
+        for item in history[:8]:
+            if not isinstance(item, Mapping):
+                continue
+            date = _pick_value((item,), "exDate", "date", "paymentDate")
+            amount = _pick_value((item,), "amount", "cashAmount", "dividend")
+            if date or amount:
+                dividend_rows.append(
+                    f"<tr><td>{_escape(date or 'Date not reported')}</td><td>{_escape(_money(amount) if amount is not None else '—')}</td></tr>"
+                )
+    dividend_html = (
+        f'<div class="grid insight-grid dividend-cards">{"".join(dividend_cards)}</div>'
+        if dividend_cards else '<p class="muted">Dividend yield and payment details are not available.</p>'
+    )
+    dividend_html += (
+        '<h4 class="subheading">Recent dividend history</h4>'
+        + _table(("Ex-dividend date", "Cash amount per share"), dividend_rows, "Recent dividend payments are not available.")
+    )
+
+    business = data.get("businessMetrics") or {}
+    business_overview = business.get("overview") or {}
+    business_description = _pick_value((business_overview,), "description", "title")
+    business_items = []
+    for metric_set in (
+        business_overview.get("trailingMetrics") or [],
+        business_overview.get("annualMetrics") or [],
+    ):
+        for item in metric_set if isinstance(metric_set, list) else []:
+            if not isinstance(item, Mapping):
+                continue
+            label = _pick_value((item,), "title", "name", "label", "metric")
+            value = _pick_value((item,), "value", "latest", "currentValue")
+            if label and value is not None:
+                business_items.append(f"<tr><td>{_escape(label)}</td><td>{_escape(value)}</td></tr>")
+                if len(business_items) >= 8:
+                    break
+        if len(business_items) >= 8:
+            break
+
+    financial_cards_html = "".join(financial_cards) or '<p class="muted">Key financial figures are not available.</p>'
+    return (
+        '<section class="analysis-section company-data" id="company-data">'
+        '<div class="section-kicker">Company information</div><h2 id="overview">Company profile</h2>'
+        + (f'<details class="company-description"><summary>Show company description</summary><p>{_escape(description)}</p></details>' if description else "")
+        + (f'<div class="grid insight-grid">{fact_cards}</div>' if fact_cards else "")
+        + '<div class="company-grid">'
+        + f'<div class="story-card"><h3>Financial snapshot</h3><div class="grid insight-grid">{financial_cards_html}</div></div>'
+        + f'<div class="story-card" id="statistics"><h3>Statistics</h3>{_table(("Measure", "Latest reported value"), stat_rows, "Key statistics are not available.")}</div>'
+        + '</div><h3 class="subheading" id="financial-statements">Financial statements</h3>'
+        + _statement_html(financials)
+        + '<div class="company-grid">'
+        + f'<div class="story-card" id="forecasts"><h3>Forecasts &amp; analyst ratings</h3>{forecast_html}</div>'
+        + f'<div class="story-card" id="dividends"><h3>Dividends</h3>{dividend_html}</div>'
+        + '</div><div class="story-card business-metrics" id="business-metrics"><h3>Business metrics</h3>'
+        + (f'<p>{_escape(business_description)}</p>' if business_description else "")
+        + _table(("Business measure", "Latest reported value"), business_items, "Business metrics are not available.")
+        + '</div></section>'
+    )
+
+
+def _source_data_html(data: Mapping[str, Any], asset_type: str) -> str:
+    if asset_type != "stock" or not data:
+        return ""
+    return _company_information_html(data)
+
+
+def _news_html(data: Mapping[str, Any]) -> str:
+    def clean_article_text(value: Any) -> str:
+        text = str(value)
+        for damaged, corrected in (
+            ("\u00e2\u0080\u0098", "‘"),
+            ("\u00e2\u0080\u0099", "’"),
+            ("\u00e2\u0080\u009c", "“"),
+            ("\u00e2\u0080\u009d", "”"),
+            ("\u00e2\u0080\u0093", "–"),
+            ("\u00e2\u0080\u0094", "—"),
+        ):
+            text = text.replace(damaged, corrected)
+        return text
+
+    articles = []
+    for item in data.get("news") or []:
+        if not isinstance(item, Mapping):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not url.lower().startswith(("https://", "http://")):
+            continue
+        title = clean_article_text(item.get("title") or item.get("headline") or "Article")
+        published = clean_article_text(item.get("published") or item.get("date") or "Date not available")
+        source = clean_article_text(item.get("source") or "Source not available")
+        summary = item.get("summary") or item.get("text")
+        if summary:
+            summary_text = clean_article_text(summary).strip()
+            if len(summary_text) > 220:
+                summary_text = summary_text[:217].rsplit(" ", 1)[0] + "..."
+            summary_html = f'<p>{_escape(summary_text)}</p>'
+        else:
+            summary_html = ""
+        articles.append(
+            '<a class="news-card" target="_blank" rel="noopener noreferrer" href="'
+            + html.escape(url, quote=True) + '"><div class="news-meta">'
+            + _escape(source) + ' <span>·</span> ' + _escape(published)
+            + '</div><h3>' + _escape(title) + '</h3>' + summary_html
+            + '<span class="news-link">Read article <span aria-hidden="true">↗</span></span></a>'
+        )
+    visible, additional = articles[:6], articles[6:]
+    news_content = "".join(visible)
+    if additional:
+        news_content += (
+            f'<details class="news-more"><summary>Show {len(additional)} more articles</summary>'
+            + "".join(additional) + "</details>"
+        )
+    return (
+        '<section class="analysis-section" id="news"><div class="section-kicker">Recent coverage</div>'
+        '<h2>News &amp; headlines</h2>'
+        + (f'<div class="news-grid">{news_content}</div>' if articles else
+           '<p class="muted">No linked news articles are available.</p>')
+        + "</section>"
     )
 
 
@@ -1179,6 +1564,7 @@ def write_stock_visual_report(
     price_data: Any,
     analysis: Mapping[str, Any],
     output_path: Path,
+    stock_data: Optional[Mapping[str, Any]] = None,
 ) -> Path:
     """Write a self-contained HTML/SVG research dashboard without plotting packages."""
     pd = _pandas_module()
@@ -1192,6 +1578,7 @@ def write_stock_visual_report(
     previous_close = _number(frame["Close"].iloc[-2]) if len(frame) > 1 else current
     change_pct = ((current / previous_close - 1) * 100) if current is not None and previous_close else None
     escaped_ticker = html.escape(str(ticker))
+    company_name = html.escape(_company_name(stock_data or {}, str(ticker)))
     title = f"MOMO Visual Research · {escaped_ticker}"
     generated = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d %H:%M UTC")
     chart = _build_chart(frame, levels.get("levels") or {})
@@ -1229,18 +1616,275 @@ def write_stock_visual_report(
 main{{max-width:1480px;margin:0 auto;padding:32px 26px 48px}}header{{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;margin-bottom:22px}}h1{{font-size:clamp(28px,4vw,44px);line-height:1.05;margin:6px 0}}.eyebrow,.muted{{color:var(--muted)}}.eyebrow{{font-size:12px;letter-spacing:.16em;text-transform:uppercase}}.asof{{text-align:right;color:var(--muted);font-size:13px}}.grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px;margin:16px 0}}.card,.panel{{background:linear-gradient(145deg,rgba(20,31,53,.98),rgba(14,22,39,.98));border:1px solid rgba(143,161,186,.14);border-radius:16px;box-shadow:0 12px 30px rgba(0,0,0,.18)}}.card{{padding:17px 19px;min-height:94px}}.label{{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}}.value{{font-size:23px;font-weight:650;margin-top:8px}}.positive{{color:var(--up)}}.negative{{color:var(--down)}}.panel{{padding:18px 20px;margin-top:15px;overflow:hidden}}.panel h2{{font-size:16px;margin:0 0 14px}}.chart-wrap{{overflow-x:auto}}svg{{display:block;width:100%;min-width:800px;height:auto}}svg text{{fill:{_COLORS["muted"]};font:11px Segoe UI,Arial,sans-serif}}table{{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}}th,td{{text-align:left;padding:12px 10px;border-bottom:1px solid rgba(143,161,186,.13)}}th{{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em}}td{{font-size:13px}}.foot{{color:var(--muted);font-size:12px;margin:20px 4px 0}}@media(max-width:800px){{main{{padding:22px 14px 36px}}.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}header{{align-items:flex-start;flex-direction:column}}.asof{{text-align:left}}}}@media(max-width:480px){{.grid{{grid-template-columns:1fr 1fr;gap:9px}}.card{{padding:13px;min-height:82px}}.value{{font-size:19px}}}}
 .analysis-nav{{position:sticky;top:0;z-index:5;display:flex;gap:8px;overflow-x:auto;margin:18px -8px 8px;padding:10px 8px;background:rgba(11,16,32,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}}.analysis-nav a{{flex:0 0 auto;color:var(--text);text-decoration:none;padding:8px 12px;border:1px solid var(--line);border-radius:999px;font-size:13px}}.analysis-nav a:hover,.analysis-nav a:focus{{border-color:#fbbf24;color:#fbbf24}}.analysis-section{{scroll-margin-top:70px;margin:30px 0}}.section-kicker{{color:#fbbf24;font-size:11px;font-weight:700;letter-spacing:.13em;text-transform:uppercase}}.analysis-section h2{{font-size:clamp(23px,3vw,30px);margin:4px 0 10px}}.section-lead{{font-size:19px;max-width:920px;margin:10px 0 16px}}.analysis-copy{{max-width:1050px;margin:12px 0}}.insight-grid{{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}}.insight-card{{min-height:120px}}.card-note{{color:var(--muted);font-size:12px;margin-top:6px}}.gap-callout,.notice{{padding:13px 15px;border:1px solid rgba(143,161,186,.16);border-radius:10px;background:rgba(143,161,186,.06);margin:14px 0}}.story-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:18px}}.story-card,.business-note,.method-explainer{{padding:16px;border:1px solid rgba(143,161,186,.13);border-radius:12px;background:rgba(17,26,46,.65)}}.story-card h3,.method-explainer h3{{font-size:14px;margin:0 0 8px}}.story-list{{padding-left:20px;margin:8px 0}}.story-list li{{margin:7px 0}}.subheading{{font-size:17px;margin:24px 0 8px}}.detail-stack{{display:grid;gap:9px;margin:12px 0}}.detail-block{{border:1px solid rgba(143,161,186,.15);border-radius:12px;background:rgba(17,26,46,.5);overflow:hidden;margin:12px 0}}.detail-block>summary{{cursor:pointer;padding:13px 15px;font-weight:650;list-style-position:inside}}.detail-block>summary:hover{{color:#fbbf24}}.detail-note{{float:right;color:var(--muted);font-size:12px;font-weight:400}}.detail-content{{padding:0 14px 14px}}.table-wrap{{overflow-x:auto;margin:10px 0}}.table-wrap table{{min-width:560px}}th{{white-space:nowrap}}td{{vertical-align:top}}.stance-pill{{display:inline-block;padding:4px 9px;border-radius:999px;background:rgba(96,165,250,.12);border:1px solid rgba(96,165,250,.28);white-space:nowrap}}.quality-layout{{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(240px,.7fr);gap:20px;align-items:center;margin:14px 0 20px}}.quality-summary{{font-size:18px;margin:0 0 14px}}.business-note p{{color:var(--muted);margin-bottom:0}}.score-row{{margin:12px 0}}.score-heading{{display:flex;justify-content:space-between;gap:12px;font-size:13px;margin-bottom:5px}}.score-track{{height:8px;background:rgba(143,161,186,.14);border-radius:999px;overflow:hidden}}.score-track span{{display:block;height:100%;background:linear-gradient(90deg,#60a5fa,#2dd4a7);border-radius:inherit}}.technical-stack{{display:grid;gap:10px;margin-top:16px}}.technical-card{{border:1px solid rgba(143,161,186,.15);border-radius:14px;background:rgba(17,26,46,.58);overflow:hidden}}.technical-card>summary{{cursor:pointer;display:grid;grid-template-columns:minmax(170px,1.3fr) repeat(3,minmax(125px,1fr)) minmax(145px,1fr);align-items:center;gap:12px;padding:15px 17px;list-style-position:inside}}.technical-card>summary:hover{{background:rgba(143,161,186,.05)}}.horizon-name{{font-weight:700}}.technical-trend{{color:var(--up)}}.expand-hint{{color:var(--muted);font-size:12px;text-align:right}}.technical-content{{padding:2px 18px 18px}}.technical-description{{color:var(--muted)}}.technical-content h4{{font-size:14px;margin:18px 0 8px}}.indicator-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px}}.indicator-card{{display:flex;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid rgba(143,161,186,.11);border-radius:9px;background:rgba(11,16,32,.45)}}.indicator-card span{{color:var(--muted);font-size:12px}}.indicator-card strong{{text-align:right;font-size:13px}}.technical-columns{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}}.signal-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}}.signal-row{{display:flex;justify-content:space-between;gap:12px;padding:9px 11px;border:1px solid rgba(143,161,186,.1);border-radius:8px;font-size:12px}}.signal-active{{color:var(--up)}}.signal-inactive{{color:var(--muted);font-weight:400}}.active-signals{{padding:12px 14px;margin:14px 0;background:rgba(45,212,167,.07);border-radius:9px;font-size:13px}}.quality-facts,.source-facts{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:9px;margin:14px 0}}.quality-facts span,.source-facts span{{display:flex;flex-direction:column;gap:4px;padding:12px;border:1px solid rgba(143,161,186,.12);border-radius:9px;font-size:13px;overflow-wrap:anywhere}}.quality-facts strong,.source-facts strong{{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}}.source-facts{{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}}.warning{{border-color:rgba(251,191,36,.25);background:rgba(251,191,36,.07)}}.method-explainers{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:18px 0}}.method-explainer p{{color:var(--muted);font-size:13px;margin:0}}.chart-panel{{margin-top:18px}}@media(max-width:900px){{.technical-card>summary{{grid-template-columns:repeat(2,minmax(0,1fr))}}.technical-trend{{text-align:right}}.expand-hint{{text-align:left}}.method-explainers{{grid-template-columns:1fr}}}}@media(max-width:680px){{main{{padding:18px 12px 32px}}.story-grid,.quality-layout,.technical-columns{{grid-template-columns:1fr}}.technical-card>summary{{grid-template-columns:1fr 1fr;gap:7px;padding:12px}}.horizon-name{{grid-column:1/-1}}.technical-trend{{text-align:left}}.expand-hint{{grid-column:1/-1}}.detail-note{{float:none;display:block;margin:4px 0 0}}.section-lead{{font-size:17px}}}}@media(max-width:480px){{.analysis-nav a{{font-size:12px;padding:7px 10px}}.story-card{{padding:13px}}.signal-grid{{grid-template-columns:1fr}}.chart-insights{{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
+<style>
+.company-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:14px 0}}
+.company-data .story-card{{min-width:0}}.company-data .story-card .grid{{margin:8px 0}}
+.company-data .story-card .card{{min-height:84px}}.statement-panel{{margin:12px 0;padding:16px;border:1px solid rgba(143,161,186,.13);border-radius:12px;background:rgba(17,26,46,.55)}}
+.company-data .table-wrap table{{min-width:0}}
+.statement-panel h3,.company-data .story-card h3{{font-size:15px;margin:0 0 8px}}
+.company-description{{max-width:920px;margin:10px 0 16px;border:1px solid rgba(143,161,186,.13);border-radius:10px;background:rgba(17,26,46,.45)}}
+.company-description>summary{{cursor:pointer;padding:9px 12px;color:var(--muted);font-size:13px;font-weight:600}}
+.company-description>summary:hover{{color:#fbbf24}}.company-description p{{margin:0;padding:0 12px 12px;color:var(--muted);font-size:14px;line-height:1.55}}
+.forecast-cards,.dividend-cards{{grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:9px}}
+.forecast-cards .card,.dividend-cards .card{{padding:13px;min-height:76px}}
+.forecast-cards .value,.dividend-cards .value{{font-size:18px}}
+.company-data .subheading{{font-size:14px;margin:18px 0 6px}}
+.news-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}}
+.news-card{{display:flex;flex-direction:column;min-width:0;padding:16px 18px;border:1px solid rgba(143,161,186,.14);border-radius:14px;background:linear-gradient(145deg,rgba(20,31,53,.98),rgba(14,22,39,.98));color:var(--text);text-decoration:none;transition:border-color .15s,transform .15s}}
+.news-card:hover,.news-card:focus{{border-color:#60a5fa;transform:translateY(-2px);outline:none}}
+.news-meta{{color:var(--muted);font-size:12px}}.news-card h3{{font-size:16px;line-height:1.35;margin:8px 0}}.news-card p{{color:var(--muted);font-size:13px;margin:0 0 10px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}}.news-link{{color:#8ac5ff;font-size:12px;font-weight:650;margin-top:auto;padding-top:10px}}
+.news-more{{grid-column:1/-1;border:1px solid rgba(143,161,186,.15);border-radius:12px;padding:12px 14px;background:rgba(17,26,46,.5)}}
+.news-more>summary{{cursor:pointer;font-weight:650}}.news-more .news-card{{margin-top:10px}}
+@media(max-width:680px){{.company-grid,.news-grid{{grid-template-columns:1fr}}}}
+</style>
 </head>
 <body><main>
-<header><div><div class="eyebrow">MOMO · Visual Research</div><h1>{escaped_ticker}</h1><div class="muted">{html.escape(str((analysis.get("dataContext") or {}).get("source") or "Price + fundamentals"))} · Last {len(frame)} trading sessions</div></div><div class="asof">Generated {generated}<br>Model stance: <strong>{stance}</strong></div></header>
+<header><div><div class="eyebrow">MOMO · Visual Research</div><h1>{escaped_ticker}</h1><div class="muted">{company_name}</div></div><div class="asof">Generated {generated}<br>Model stance: <strong>{stance}</strong></div></header>
 <section class="grid">
 <article class="card"><div class="label">Latest close</div><div class="value">{price_text}</div></article>
 <article class="card"><div class="label">Latest session</div><div class="value" style="color:{current_color}">{'—' if change_pct is None else f'{change_pct:+.2f}%'}</div></article>
 <article class="card"><div class="label">Composite score</div><div class="value">{html.escape(str(score if score is not None else '—'))}<span class="muted" style="font-size:14px"> / 100</span></div></article>
 <article class="card"><div class="label">Technical snapshot</div><div class="value" style="font-size:17px">RSI {_format_price(rsi)} · MACD {_money(macd)}</div></article>
 </section>
-{_analysis_results_html(analysis, chart, chart_details)}
+{_analysis_results_html(analysis, chart, chart_details, stock_data)}
 <p class="foot">Charts and indicators are model outputs for research, not personalized investment advice or guaranteed forecasts. Historical price patterns do not predict future results.</p>
 </main></body></html>"""
+    output_path.write_text(page, encoding="utf-8")
+    return output_path
+
+
+def write_etf_visual_report(
+    ticker: str,
+    data: Mapping[str, Any],
+    output_path: Path,
+    price_data: Any = None,
+    technical: Optional[Mapping[str, Any]] = None,
+) -> Path:
+    """Write a fund-specific research dashboard with clickable article links."""
+    profile = data.get("profile") or {}
+    quote = data.get("quote") or {}
+    fund = data.get("fundMetrics") or {}
+    holdings = data.get("holdings") or {}
+    dividends = data.get("dividends") or {}
+    performance = data.get("performance") or {}
+    total_return = performance.get("totalReturn") or {}
+    latest = _number(fund.get("marketPrice") or quote.get("price"))
+    nav = fund.get("nav") or profile.get("nav")
+    expense_ratio = profile.get("expenseRatio")
+    if isinstance(expense_ratio, str) and "%" in expense_ratio:
+        expense_display = _fund_percent(expense_ratio, decimals=2)
+    elif expense_ratio is not None:
+        profile_ratio = _number(expense_ratio)
+        expense_display = _fund_percent(
+            expense_ratio, fraction=profile_ratio is not None and abs(profile_ratio) < 0.01, decimals=2
+        )
+    else:
+        expense_display = _fund_percent(fund.get("expenseRatio"), fraction=True, decimals=2)
+    distribution_yield = dividends.get("yield")
+    yield_display = (
+        _fund_percent(distribution_yield) if distribution_yield is not None
+        else _fund_percent(fund.get("dividendYield"), fraction=True)
+    )
+    metrics = (
+        ("Market price", _money(latest), "Most recent available quote"),
+        ("Net asset value", _money(nav), "NAV per share"),
+        ("Expense ratio", expense_display, "Annual fund operating expenses"),
+        ("Assets under management", _money(_assets_under_management(data), compact=True), "Fund size"),
+        ("Distribution yield", yield_display, "Reported yield"),
+        ("Holdings", str(holdings.get("totalHoldingsCount") or "Not available"), "Positions in the portfolio"),
+    )
+    cards = "".join(_metric_card(label, value, note) for label, value, note in metrics)
+
+    disclosed_holdings = [
+        item for item in (holdings.get("topHoldings") or []) if isinstance(item, Mapping)
+    ]
+    raw_weights = [
+        (item.get("weight") if item.get("weight") is not None else item.get("weightPct"))
+        for item in disclosed_holdings
+    ]
+    numeric_weights = [
+        _number(value) for value in raw_weights
+        if not (isinstance(value, str) and "%" in value)
+    ]
+    percentage_points = any(value is not None and abs(value) > 1 for value in numeric_weights)
+
+    def weight_percent(value: Any) -> Optional[float]:
+        number = _number(value)
+        if number is None:
+            return None
+        if isinstance(value, str) and "%" in value:
+            return number
+        return number if percentage_points else number * 100
+
+    def holding_row(item: Mapping[str, Any]) -> str:
+        name = item.get("name") or item.get("ticker") or "—"
+        symbol = item.get("ticker") or "—"
+        raw_weight = item.get("weight") if item.get("weight") is not None else item.get("weightPct")
+        pct = weight_percent(raw_weight)
+        value = f"{pct:.2f}%" if pct is not None else "—"
+        bar = min(max(pct or 0, 0), 100)
+        return (
+            f'<tr><td>{_escape(name)}</td><td>{_escape(symbol)}</td>'
+            f'<td><div class="weight-value">{_escape(value)}</div>'
+            f'<div class="weight-track"><span style="width:{bar:.2f}%"></span></div></td></tr>'
+        )
+
+    holding_rows = [holding_row(item) for item in disclosed_holdings]
+    top_holding_rows = holding_rows[:10]
+    more_holding_rows = holding_rows[10:]
+    holdings_table = _table(("Holding", "Ticker", "Portfolio weight"), top_holding_rows, "Holdings are not available.")
+    if more_holding_rows:
+        holdings_table += (
+            f'<details class="news-more holdings-more"><summary>Show {len(more_holding_rows)} more holdings</summary>'
+            + _table(("Holding", "Ticker", "Portfolio weight"), more_holding_rows)
+            + "</details>"
+        )
+
+    sector_source = holdings.get("sectors") or []
+    if isinstance(sector_source, Mapping):
+        sector_source = [{"name": key, "weight": value} for key, value in sector_source.items()]
+    sector_entries = [item for item in sector_source if isinstance(item, Mapping)]
+    sector_raw_weights = [
+        item.get("weight") or item.get("weightPct") or item.get("v") or item.get("value") or item.get("w")
+        for item in sector_entries
+    ]
+    sector_numeric = [
+        _number(value) for value in sector_raw_weights
+        if not (isinstance(value, str) and "%" in value)
+    ]
+    sector_points = any(value is not None and abs(value) > 1 for value in sector_numeric)
+    sector_rows = []
+    for item, raw_weight in zip(sector_entries, sector_raw_weights):
+        pct = _number(raw_weight)
+        if pct is not None and not (isinstance(raw_weight, str) and "%" in raw_weight) and not sector_points:
+            pct *= 100
+        name = item.get("name") or item.get("sector") or item.get("n") or item.get("label") or item.get("t") or "—"
+        if pct is None:
+            rendered = "Not available"
+            bar = 0
+        else:
+            rendered = f"{pct:.2f}%"
+            bar = min(max(pct, 0), 100)
+        sector_rows.append(
+            f'<div class="allocation-row"><div class="allocation-heading"><span>{_escape(name)}</span>'
+            f'<strong>{_escape(rendered)}</strong></div><div class="allocation-track">'
+            f'<span style="width:{bar:.2f}%"></span></div></div>'
+        )
+
+    period_labels = {
+        "1m": "1 month", "tr1m": "1 month",
+        "3m": "3 months", "tr3m": "3 months",
+        "6m": "6 months", "tr6m": "6 months",
+        "ytd": "Year to date", "trytd": "Year to date",
+        "1y": "1 year", "tr1y": "1 year",
+        "3y": "3 years", "tr3y": "3 years",
+        "5y": "5 years", "tr5y": "5 years", "cagr5y": "5-year annualized",
+        "cagr10y": "10-year annualized", "cagrmax": "Since inception (annualized)",
+    }
+    return_rows = []
+    if isinstance(total_return, Mapping):
+        for key, value in total_return.items():
+            if value is None:
+                continue
+            label = period_labels.get(_normalized_key(key), re.sub(r"(?<!^)([A-Z])", r" \1", str(key)).replace("_", " ").strip())
+            return_rows.append(
+                f"<tr><td>{_escape(label)}</td><td>{_escape(_fund_percent(value))}</td></tr>"
+            )
+
+    distribution_history = dividends.get("history") or []
+    distribution_rows = []
+    if isinstance(distribution_history, list):
+        for item in distribution_history[:8]:
+            if not isinstance(item, Mapping):
+                continue
+            date = _pick_value((item,), "exDate", "date", "paymentDate")
+            amount = _pick_value((item,), "cashAmount", "amount", "distribution")
+            if date or amount is not None:
+                distribution_rows.append(
+                    f"<tr><td>{_escape(date or '—')}</td><td>{_escape(_money(amount) if amount is not None else '—')}</td></tr>"
+                )
+    distribution_summary = dividends.get("metrics") or dividends.get("summary") or {}
+    distribution_facts = []
+    for label, aliases in (
+        ("Annual distribution", ("annualDividend", "annualRate", "dps")),
+        ("Payment frequency", ("payoutFrequency", "frequency")),
+        ("Next ex-date", ("exDividendDate", "exDate")),
+    ):
+        value = _pick_value((distribution_summary, dividends), *aliases)
+        if value is not None:
+            if label == "Annual distribution" and _number(value) is not None:
+                value = _money(value)
+            distribution_facts.append(_metric_card(label, str(value)))
+
+    concentration = sum(
+        pct for pct in (weight_percent(value) for value in raw_weights) if pct is not None
+    ) if raw_weights else None
+    if concentration is not None and concentration > 100:
+        diversification = (
+            '<p class="muted">Reported top-holding weights total more than 100%, so concentration is not shown. '
+            'Check the source weights before drawing conclusions.</p>'
+        )
+    elif concentration is not None:
+        diversification = (
+            f'<p>The disclosed top holdings represent <strong>{concentration:.1f}%</strong> of fund assets. '
+            'This is partial concentration, not a measure of the full portfolio diversification.</p>'
+        )
+    else:
+        diversification = '<p class="muted">Holding weights are unavailable, so concentration cannot be calculated.</p>'
+    chart_html = ""
+    if price_data is not None:
+        try:
+            frame = _prepare_prices(price_data)
+            levels = ((technical or {}).get("timeframes") or {}).get("1m") or {}
+            chart_html = f'<div class="chart-wrap">{_build_chart(frame, levels.get("levels") or {})}</div>'
+        except (ValueError, RuntimeError):
+            chart_html = '<p class="muted">Price chart is not available for the supplied history.</p>'
+    timeframe_rows = []
+    for key, item in ((technical or {}).get("timeframes") or {}).items():
+        timeframe_rows.append(
+            f"<tr><td>{_escape(item.get('label') or key)}</td><td>{_escape(item.get('trend') or '—')}</td>"
+            f"<td>{_escape(item.get('technicalScore') if item.get('technicalScore') is not None else '—')}</td>"
+            f"<td>{_escape(item.get('confidence') if item.get('confidence') is not None else '—')}</td></tr>"
+        )
+    technical_section = _table(("Timeframe", "Trend", "Technical score", "Confidence"), timeframe_rows,
+                               (technical or {}).get("reason") or "Technical analysis is unavailable.")
+    escaped_ticker = html.escape(str(ticker))
+    news_section = _news_html(data)
+    title = f"MOMO Fund Research · {escaped_ticker}"
+    page = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title><style>
+:root{{color-scheme:dark;--bg:{_COLORS["background"]};--panel:{_COLORS["panel"]};--line:{_COLORS["grid"]};--text:{_COLORS["text"]};--muted:{_COLORS["muted"]};--up:{_COLORS["up"]};--down:{_COLORS["down"]}}}
+*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(ellipse at 10% 0%,#172541 0,transparent 36%),var(--bg);color:var(--text);font:15px/1.5 Segoe UI,Arial,sans-serif}}
+main{{max-width:1480px;margin:0 auto;padding:32px 26px 48px}}header{{display:flex;justify-content:space-between;align-items:flex-end;gap:20px;margin-bottom:22px}}h1{{font-size:clamp(28px,4vw,44px);line-height:1.05;margin:6px 0}}h2{{font-size:clamp(23px,3vw,30px);margin:4px 0 10px}}h3{{font-size:15px;margin:0 0 8px}}.eyebrow,.muted{{color:var(--muted)}}.eyebrow{{font-size:12px;letter-spacing:.16em;text-transform:uppercase}}.asof{{text-align:right;color:var(--muted);font-size:13px}}
+.grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px;margin:16px 0}}.card,.panel{{background:linear-gradient(145deg,rgba(20,31,53,.98),rgba(14,22,39,.98));border:1px solid rgba(143,161,186,.14);border-radius:16px;box-shadow:0 12px 30px rgba(0,0,0,.18)}}.card{{padding:17px 19px;min-height:94px}}.label{{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}}.value{{font-size:23px;font-weight:650;margin-top:8px;overflow-wrap:anywhere}}.card-note{{color:var(--muted);font-size:12px;margin-top:6px}}.panel{{padding:18px 20px;margin:16px 0;overflow:hidden}}.analysis-section{{scroll-margin-top:70px;margin:30px 0}}.section-kicker{{color:#fbbf24;font-size:11px;font-weight:700;letter-spacing:.13em;text-transform:uppercase}}.section-lead{{font-size:18px;max-width:920px;margin:10px 0 16px}}.analysis-nav{{position:sticky;top:0;z-index:5;display:flex;gap:8px;overflow-x:auto;margin:18px -8px 8px;padding:10px 8px;background:rgba(11,16,32,.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}}.analysis-nav a{{flex:0 0 auto;color:var(--text);text-decoration:none;padding:8px 12px;border:1px solid var(--line);border-radius:999px;font-size:13px}}
+.table-wrap{{overflow-x:auto;margin:10px 0}}table{{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}}th,td{{text-align:left;padding:12px 10px;border-bottom:1px solid rgba(143,161,186,.13)}}th{{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap}}td{{font-size:13px;overflow-wrap:anywhere;vertical-align:top}}.chart-wrap{{overflow-x:auto}}svg{{display:block;width:100%;min-width:800px;height:auto}}svg text{{fill:{_COLORS["muted"]}}}.foot{{color:var(--muted);font-size:12px;margin:20px 4px 0}}
+.allocation-row{{margin:12px 0}}.allocation-heading{{display:flex;justify-content:space-between;gap:12px;font-size:13px;margin-bottom:6px}}.allocation-track,.weight-track{{height:8px;background:rgba(143,161,186,.14);border-radius:999px;overflow:hidden}}.allocation-track span,.weight-track span{{display:block;height:100%;background:linear-gradient(90deg,#60a5fa,#2dd4a7);border-radius:inherit}}.weight-value{{font-variant-numeric:tabular-nums;font-weight:650;margin-bottom:5px}}.weight-track{{height:5px;max-width:180px}}.distribution-summary{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}}.news-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:14px 0}}.news-card{{display:flex;flex-direction:column;min-width:0;padding:16px 18px;border:1px solid rgba(143,161,186,.14);border-radius:14px;background:linear-gradient(145deg,rgba(20,31,53,.98),rgba(14,22,39,.98));color:var(--text);text-decoration:none}}.news-card:hover,.news-card:focus{{border-color:#60a5fa;outline:none}}.news-meta{{color:var(--muted);font-size:12px}}.news-card h3{{font-size:16px;line-height:1.35;margin:8px 0}}.news-card p{{color:var(--muted);font-size:13px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}}.news-link{{color:#8ac5ff;font-size:12px;font-weight:650;margin-top:auto;padding-top:10px}}.news-more{{grid-column:1/-1;border:1px solid rgba(143,161,186,.15);border-radius:12px;padding:12px 14px;background:rgba(17,26,46,.5)}}.news-more>summary{{cursor:pointer;font-weight:650}}.news-more .news-card{{margin-top:10px}}
+@media(max-width:800px){{main{{padding:22px 14px 36px}}.grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}header{{align-items:flex-start;flex-direction:column}}.asof{{text-align:left}}}}@media(max-width:680px){{.news-grid{{grid-template-columns:1fr}}}}@media(max-width:480px){{main{{padding:18px 12px 32px}}.grid{{grid-template-columns:1fr 1fr;gap:9px}}.card{{padding:13px;min-height:82px}}.value{{font-size:19px}}}}
+</style></head><body><main>
+<header><div><div class="eyebrow">MOMO · Fund research</div><h1>{escaped_ticker}</h1><div class="muted">{_escape(fund.get("fundName") or profile.get("name") or "Exchange-traded fund")}</div></div><div class="asof">Fund profile and market data<br>Price, NAV and performance are shown separately</div></header>
+<nav class="analysis-nav" aria-label="Fund sections"><a href="#overview">Overview</a><a href="#holdings">Holdings</a><a href="#allocation">Sector allocation</a><a href="#diversification">Diversification</a><a href="#performance">Performance</a><a href="#distributions">Distributions</a><a href="#technical">Technical analysis</a><a href="#news">News</a></nav>
+<section class="analysis-section" id="overview"><div class="section-kicker">Fund profile</div><h2>Fund overview</h2>
+<div class="grid">{cards}</div><div class="panel"><p class="section-lead">{_escape(profile.get("description") or "Fund description is not available.")}</p>
+<p class="muted">Fund characteristics, holdings and distributions can change over time. Review the dates and measures shown before comparing funds.</p></div></section>
+<section class="analysis-section panel" id="holdings"><div class="section-kicker">Portfolio composition</div><h2>Top holdings</h2>
+<p class="muted">Weights show each disclosed holding as a share of the fund.</p>{holdings_table}</section>
+<section class="analysis-section panel" id="allocation"><div class="section-kicker">Portfolio composition</div><h2>Sector allocation</h2>
+{''.join(sector_rows) if sector_rows else '<p class="muted">Sector allocation is not available.</p>'}</section>
+<section class="analysis-section panel" id="diversification"><div class="section-kicker">Portfolio breadth</div><h2>Diversification &amp; concentration</h2>
+{diversification}<p class="muted">Top-holdings concentration covers only positions disclosed above; it is not the fund's complete diversification profile.</p></section>
+<section class="analysis-section panel" id="performance"><div class="section-kicker">Returns</div><h2>Fund performance</h2>
+{_table(("Period", "Reported return"), return_rows, "Performance history is not available.")}
+<h3 class="subheading">Price history and technical indicators</h3>{chart_html or '<p class="muted">Historical price chart is unavailable.</p>'}</section>
+<section class="analysis-section panel" id="distributions"><div class="section-kicker">Income</div><h2>Distributions</h2>
+<div class="distribution-summary">{''.join(distribution_facts) or '<p class="muted">Distribution details are not available.</p>'}</div>
+<h3 class="subheading">Recent distribution history</h3>{_table(("Ex-date", "Distribution per share"), distribution_rows, "Distribution history is not available.")}</section>
+<section class="analysis-section panel" id="technical"><div class="section-kicker">Price-based indicators</div><h2>Technical analysis</h2>
+<p class="muted">Trend and momentum indicators use market price history and are separate from the fund's holdings and fundamentals.</p>{technical_section}</section>
+{news_section}<p class="foot">Fund data may change. NAV, market price, expenses, distributions and performance are distinct measures. This research is not investment advice.</p>
+</main></body></html>"""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(page, encoding="utf-8")
     return output_path
 
@@ -1248,3 +1892,8 @@ main{{max-width:1480px;margin:0 auto;padding:32px 26px 48px}}header{{display:fle
 def visual_filename(ticker: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", str(ticker)).strip("._-").lower()
     return f"momo_{slug or 'stock'}_visual.html"
+
+
+def etf_visual_filename(ticker: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", str(ticker)).strip("._-").lower()
+    return f"momo_{slug or 'fund'}_visual.html"

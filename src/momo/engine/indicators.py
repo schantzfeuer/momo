@@ -5,53 +5,39 @@ import numpy as np
 import pandas as pd
 from .market_data import _clip, _series_last, standardize_ohlcv
 
-def _rsi(close: pd.Series, window: int = 14) -> pd.Series:
-    delta = close.diff()
-    gain = delta.clip(lower=0.0)
-    loss = -delta.clip(upper=0.0)
-    avg_gain = gain.ewm(alpha=1 / window, adjust=False, min_periods=window).mean()
-    avg_loss = loss.ewm(alpha=1 / window, adjust=False, min_periods=window).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50.0)
-
-def _atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
-    prev_close = df["Close"].shift(1)
-    tr = pd.concat([
-        df["High"] - df["Low"],
-        (df["High"] - prev_close).abs(),
-        (df["Low"] - prev_close).abs(),
-    ], axis=1).max(axis=1)
-    return tr.ewm(alpha=1 / window, adjust=False, min_periods=window).mean()
+try:
+    import talib
+except ImportError:
+    talib = None
 
 def compute_indicators(price_data: pd.DataFrame) -> pd.DataFrame:
+    if talib is None:
+        raise ImportError("Technical analysis requires TA-Lib; install the analysis extra.")
     df = standardize_ohlcv(price_data)
     close = df["Close"]
 
+    close_values = close.to_numpy(dtype=float)
+    high_values = df["High"].to_numpy(dtype=float)
+    low_values = df["Low"].to_numpy(dtype=float)
+    volume_values = df["Volume"].fillna(0.0).to_numpy(dtype=float)
     for window in (10, 20, 50, 100, 200):
-        # Long moving averages should not appear "ready" after only ~20 bars.
-        # Requiring 60% of the intended window prevents false long-term signals.
-        min_periods = max(5, int(round(window * 0.60)))
-        df[f"SMA{window}"] = close.rolling(window, min_periods=min_periods).mean()
-    df["EMA12"] = close.ewm(span=12, adjust=False).mean()
-    df["EMA26"] = close.ewm(span=26, adjust=False).mean()
-    df["MACD"] = df["EMA12"] - df["EMA26"]
-    df["MACD_signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-    df["MACD_hist"] = df["MACD"] - df["MACD_signal"]
-    df["RSI"] = _rsi(close, 14)
+        df[f"SMA{window}"] = talib.SMA(close_values, timeperiod=window)
+    df["EMA12"] = talib.EMA(close_values, timeperiod=12)
+    df["EMA26"] = talib.EMA(close_values, timeperiod=26)
+    macd, signal, histogram = talib.MACD(close_values, fastperiod=12, slowperiod=26, signalperiod=9)
+    df["MACD"], df["MACD_signal"], df["MACD_hist"] = macd, signal, histogram
+    df["RSI"] = talib.RSI(close_values, timeperiod=14)
+    df["ADX"] = talib.ADX(high_values, low_values, close_values, timeperiod=14)
+    df["PLUS_DI"] = talib.PLUS_DI(high_values, low_values, close_values, timeperiod=14)
+    df["MINUS_DI"] = talib.MINUS_DI(high_values, low_values, close_values, timeperiod=14)
+    slow_k, slow_d = talib.STOCH(high_values, low_values, close_values, fastk_period=14,
+                                 slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0)
+    df["Stoch_%K"], df["Stoch_%D"] = slow_k, slow_d
+    upper, middle, lower = talib.BBANDS(close_values, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
+    df["BB_upper"], df["BB_middle"], df["BB_lower"] = upper, middle, lower
+    df["ATR"] = talib.ATR(high_values, low_values, close_values, timeperiod=14)
+    df["OBV"] = talib.OBV(close_values, volume_values)
     df["RSI_MA"] = df["RSI"].rolling(9, min_periods=2).mean()
-
-    low14 = df["Low"].rolling(14, min_periods=5).min()
-    high14 = df["High"].rolling(14, min_periods=5).max()
-    denom = (high14 - low14).replace(0, np.nan)
-    df["Stoch_%K"] = 100 * (close - low14) / denom
-    df["Stoch_%D"] = df["Stoch_%K"].rolling(3, min_periods=2).mean()
-
-    df["BB_middle"] = close.rolling(20, min_periods=5).mean()
-    bb_std = close.rolling(20, min_periods=5).std(ddof=0)
-    df["BB_upper"] = df["BB_middle"] + 2 * bb_std
-    df["BB_lower"] = df["BB_middle"] - 2 * bb_std
-    df["ATR"] = _atr(df, 14)
 
     typical = (df["High"] + df["Low"] + df["Close"]) / 3.0
     volume = df["Volume"].fillna(0.0)
@@ -61,8 +47,6 @@ def compute_indicators(price_data: pd.DataFrame) -> pd.DataFrame:
     vol60 = volume.rolling(60, min_periods=1).sum()
     df["VWAP60"] = pv.rolling(60, min_periods=1).sum() / vol60.replace(0, np.nan)
 
-    direction = np.sign(close.diff()).fillna(0.0)
-    df["OBV"] = (direction * volume).cumsum()
     df["OBV_MA"] = df["OBV"].rolling(20, min_periods=2).mean()
 
     high9 = df["High"].rolling(9, min_periods=2).max()

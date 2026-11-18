@@ -1,24 +1,32 @@
 from __future__ import annotations
-import json
 import logging
+import copy
+import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlsplit
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence
 import requests as req
 from .core.config import logger
 from . import __version__
 from .assemblers.etf import assemble_etf_data
 from .assemblers.stock import assemble_stock_data
 from .core.config import MomoConfig
-from .core.exceptions import MomoError, MomoValidationError
-from .core.http import _fetch_html
-from .core.validation import _validate_ticker
+from enum import Enum
+from .core.exceptions import MomoError, MomoValidationError, MomoClosedError
+from .core.http import ManagedSession, _fetch_html
+from .core.persistence import atomic_json_write
+from .core.observability import StructuredFormatter, increment_metric
+from .core.orchestration import FetchOrchestrator
+from .core.validation import _validate_ticker, resolve_ticker
 from .extractors.normalizers import _dedupe_news
 from .parsers.etf import parse_dividend_html, parse_holdings_html, parse_overview_html
 from .parsers.stocks.metrics import parse_stock_metric_detail_html
 from .parsers.stocks.routes import STOCK_SECTION_ROUTES, parse_stock_section_html
+
+if TYPE_CHECKING:
+    from .objects import ETF, ETFs, Stock, Stocks
 
 def enable_logging(level: int = logging.INFO) -> None:
     """Enable momo module logging output on the console (stderr).
@@ -29,12 +37,28 @@ def enable_logging(level: int = logging.INFO) -> None:
         import momo
         momo.enable_logging()
     """
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
-    logger.addHandler(handler)
+    existing = getattr(logger, "_momo_console_handler", None)
+    if existing is None:
+        handler = logging.StreamHandler()
+        handler.setFormatter(StructuredFormatter("[%(levelname)s] %(name)s: %(message)s"))
+        handler._momo_handler = True
+        logger.addHandler(handler)
+        logger._momo_console_handler = handler
     logger.setLevel(level)
 
+
+def disable_logging() -> None:
+    handler = getattr(logger, "_momo_console_handler", None)
+    if handler is not None:
+        logger.removeHandler(handler)
+        delattr(logger, "_momo_console_handler")
+
 from .core.cache import TTLCache
+
+
+class MomoLifecycle(str, Enum):
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
 
 class Momo:
     """API for fetching comprehensive ETF data from
@@ -66,13 +90,29 @@ class Momo:
             config = replace(config, **config_overrides)
         self.config = config
         self.save_debug_html = save_debug_html
-        self._session = req.Session()
-        self._session.headers.update(self.config.headers)
-        self._cache = TTLCache(self.config.cache_ttl)
+        self._lifecycle = MomoLifecycle.OPEN
+        self._session = ManagedSession(config)
+        self._cache = TTLCache(self.config.cache_ttl, self.config.cache_max_size)
+        self.run_summaries: List[Dict[str, Any]] = []
+        self.provider_latencies_ms: Dict[str, float] = {}
+
+    def __getattribute__(self, name: str) -> Any:
+        if not name.startswith("_"):
+            try:
+                lifecycle = object.__getattribute__(self, "_lifecycle")
+            except AttributeError:
+                lifecycle = MomoLifecycle.OPEN
+            if lifecycle == MomoLifecycle.CLOSED and name not in {"close", "__class__", "config"}:
+                attribute = object.__getattribute__(self, name)
+                if callable(attribute):
+                    raise MomoClosedError("Momo has been closed and cannot perform operations.")
+        return object.__getattribute__(self, name)
 
     # -- context manager (ensures the HTTP connection is closed cleanly) ---------
 
     def __enter__(self) -> "Momo":
+        if self._lifecycle == MomoLifecycle.CLOSED:
+            raise MomoClosedError("Momo has been closed and cannot be reopened.")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -80,11 +120,13 @@ class Momo:
 
     def close(self) -> None:
         """Close the HTTP session and its connection pool."""
-        self._session.close()
+        if self._lifecycle == MomoLifecycle.OPEN:
+            self._session.close()
+            self._lifecycle = MomoLifecycle.CLOSED
 
     def __repr__(self) -> str:
         return (
-            f"Momo(etf_base_url={self.config.base_url!r}, "
+            f"Momo(etf_base_url={self.config.etf_base_url!r}, "
             f"stock_base_url={self.config.stock_base_url!r}, "
             f"use_cache={self.config.use_cache}, max_retries={self.config.max_retries})"
         )
@@ -107,15 +149,120 @@ class Momo:
         """Clear this instance's entire in-memory cache."""
         self._cache.clear()
 
+    def resolve_symbol(self, ticker: str):
+        """Resolve syntax separately from provider canonicalization."""
+        return resolve_ticker(ticker, self.config.ticker_resolver)
+
+    def Stock(self, ticker: str) -> Stock:
+        from .objects import Stock
+        return Stock(self, ticker)
+
+    def Stocks(self, *tickers: str) -> Stocks:
+        from .objects import Stocks
+        return Stocks(self, tickers)
+
+    def ETF(self, ticker: str) -> ETF:
+        from .objects import ETF
+        return ETF(self, ticker)
+
+    def ETFs(self, *tickers: str) -> ETFs:
+        from .objects import ETFs
+        return ETFs(self, tickers)
+
+    def Technical(
+        self,
+        ticker: str,
+        price_data: Any = None,
+        period: str = "10y",
+        interval: str = "1d",
+        auto_fetch_price: bool = True,
+        timeframes: Optional[Sequence[Any]] = None,
+    ) -> Dict[str, Any]:
+        """Analyze a stock or ETF using prices only, independently of fundamentals."""
+        ticker = _validate_ticker(ticker)
+        try:
+            from .engine.market_data import fetch_yahoo_history, standardize_ohlcv
+            from .engine.technical import analyze_technical_timeframe, resolve_timeframes
+        except ImportError as exc:
+            raise MomoError("Technical analysis requires the analysis dependencies, including TA-Lib.") from exc
+        price_error = None
+        if price_data is None and auto_fetch_price:
+            try:
+                price_data = fetch_yahoo_history(ticker, period=period, interval=interval)
+            except Exception:
+                price_error = "Historical price data could not be retrieved."
+        if price_data is None:
+            return {"ticker": ticker, "assetType": "technical", "available": False,
+                    "reason": price_error or "Historical OHLCV is unavailable", "timeframes": {}}
+        frame = standardize_ohlcv(price_data)
+        if frame.empty:
+            raise MomoValidationError("price_data contains no usable OHLCV rows.")
+        specs = resolve_timeframes(timeframes)
+        try:
+            analyses = {spec.key: analyze_technical_timeframe(frame, spec) for spec in specs}
+        except ImportError as exc:
+            raise MomoError("Technical analysis requires TA-Lib; install the analysis extra.") from exc
+        return {
+            "ticker": ticker,
+            "assetType": "technical",
+            "available": True,
+            "dataPoints": len(frame),
+            "from": str(frame.index[0]),
+            "to": str(frame.index[-1]),
+            "timeframes": analyses,
+        }
+
     # -- fetch + parse each page ---------------------------------------------------
 
-    def _fetch_and_maybe_save(self, url: str, ticker: str, page: str) -> str:
-        html = _fetch_html(self._session, url, self.config)
+    def _fetch_and_maybe_save(self, url: str, ticker: str, page: str, cache_key: Optional[str] = None) -> str:
+        started = time.monotonic()
+        try:
+            html = _fetch_html(self._session, url, self.config)
+        except MomoError:
+            stale = self._cache.get_stale(cache_key) if cache_key else None
+            if stale is not None:
+                raise
+            raise
+        finally:
+            elapsed = (time.monotonic() - started) * 1000.0
+            provider = urlsplit(url).hostname or "unknown"
+            self.provider_latencies_ms.setdefault(provider, elapsed)
+            if elapsed > self.provider_latencies_ms[provider]:
+                self.provider_latencies_ms[provider] = elapsed
         if self.save_debug_html:
-            debug_dir = self.config.debug_dir or Path.cwd()
+            debug_dir = (self.config.debug_dir or Path.cwd()) / "momo-debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                debug_dir.chmod(0o700)
+            except OSError:
+                pass
             debug_path = debug_dir / f"{ticker.lower()}_{page}_debug.html"
-            debug_path.write_text(html, encoding="utf-8")
+            redacted = re.sub(
+                r"(?i)\b((?:authorization|cookie|set-cookie|bearer|token|api[_-]?key)\b\s*[=:]\s*)([^\s<,&;]+)",
+                r"\1[REDACTED]",
+                html,
+            )
+            redacted = re.sub(
+                r"(?i)(bearer\s+)[A-Za-z0-9._~-]+",
+                r"\1[REDACTED]",
+                redacted,
+            )
+            redacted = re.sub(
+                r"(?i)\b(?:authorization|proxy-authorization)\s*:\s*[^\s<]+(?:\s+[A-Za-z0-9._~-]+)?",
+                "[REDACTED]",
+                redacted,
+            )
+            debug_path.write_text(redacted, encoding="utf-8")
+            try:
+                debug_path.chmod(0o600)
+            except OSError:
+                pass
+            artifacts = sorted(debug_dir.glob("*_debug.html"), key=lambda item: item.stat().st_mtime)
+            for old_file in artifacts[:max(0, len(artifacts) - self.config.debug_max_files)]:
+                try:
+                    old_file.unlink()
+                except OSError:
+                    pass
             logger.debug("HTML debug saved to: %s", debug_path)
         return html
 
@@ -125,8 +272,17 @@ class Momo:
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
-        url = f"{self.config.base_url}/{ticker.lower()}/"
-        html = self._fetch_and_maybe_save(url, ticker, "overview")
+        url = f"{self.config.etf_base_url.rstrip('/')}/{ticker.lower()}/"
+        try:
+            html = self._fetch_and_maybe_save(url, ticker, "overview", cache_key)
+        except MomoError as exc:
+            stale = self._cache.get_stale(cache_key)
+            if stale is not None:
+                fallback = copy.deepcopy(stale)
+                fallback["_stale_fallback"] = True
+                fallback["_stale_reason"] = str(exc)
+                return fallback
+            raise
         data = parse_overview_html(html)
         self._cache_set(cache_key, data)
         return data
@@ -137,8 +293,17 @@ class Momo:
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
-        url = f"{self.config.base_url}/{ticker.lower()}/holdings/"
-        html = self._fetch_and_maybe_save(url, ticker, "holdings")
+        url = f"{self.config.etf_base_url.rstrip('/')}/{ticker.lower()}/holdings/"
+        try:
+            html = self._fetch_and_maybe_save(url, ticker, "holdings", cache_key)
+        except MomoError as exc:
+            stale = self._cache.get_stale(cache_key)
+            if stale is not None:
+                fallback = copy.deepcopy(stale)
+                fallback["_stale_fallback"] = True
+                fallback["_stale_reason"] = str(exc)
+                return fallback
+            raise
         data = parse_holdings_html(html)
         self._cache_set(cache_key, data)
         return data
@@ -149,8 +314,17 @@ class Momo:
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
-        url = f"{self.config.base_url}/{ticker.lower()}/dividend/"
-        html = self._fetch_and_maybe_save(url, ticker, "dividend")
+        url = f"{self.config.etf_base_url.rstrip('/')}/{ticker.lower()}/dividend/"
+        try:
+            html = self._fetch_and_maybe_save(url, ticker, "dividend", cache_key)
+        except MomoError as exc:
+            stale = self._cache.get_stale(cache_key)
+            if stale is not None:
+                fallback = copy.deepcopy(stale)
+                fallback["_stale_fallback"] = True
+                fallback["_stale_reason"] = str(exc)
+                return fallback
+            raise
         data = parse_dividend_html(html)
         self._cache_set(cache_key, data)
         return data
@@ -200,20 +374,20 @@ class Momo:
             "holdings": self.get_holdings,
             "dividends": self.get_dividends,
         }
-
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            future_map = {executor.submit(fn, ticker): name for name, fn in fetchers.items()}
-            for future in as_completed(future_map):
-                name = future_map[future]
-                section = "dividend" if name == "dividends" else name
-                try:
-                    results[name] = future.result()
-                except MomoError as e:
-                    logger.warning("Failed to fetch %s for %s: %s", section, ticker, e)
-                    errors.append({"section": section, "error": str(e)})
-                except Exception as e:  # Unexpected parsing bugs must not fail the entire batch.
-                    logger.exception("Unexpected error while fetching %s for %s", section, ticker)
-                    errors.append({"section": section, "error": f"Unexpected error: {e}"})
+        orchestrator = FetchOrchestrator(self.config.max_workers)
+        section_results, summary = orchestrator.run(
+            "etf",
+            {name: lambda fn=fn, ticker=ticker: fn(ticker) for name, fn in fetchers.items()},
+        )
+        results.update(section_results)
+        for name, reason in summary.failed.items():
+            section = "dividend" if name == "dividends" else name
+            logger.warning("Failed to fetch %s for %s: %s", section, ticker, reason)
+            errors.append({"section": section, "error": reason})
+        summary_dict = summary.as_dict()
+        summary_dict["ticker"] = ticker
+        summary_dict["providerLatencyMs"] = dict(self.provider_latencies_ms)
+        self.run_summaries.append(summary_dict)
 
         data = assemble_etf_data(
             ticker,
@@ -277,7 +451,19 @@ class Momo:
         if cached is not None:
             return cached
         url = f"{self.config.stock_base_url.rstrip('/')}/{ticker.lower()}/" + route
-        html = self._fetch_and_maybe_save(url, ticker, f"stock_{section}")
+        try:
+            html = self._fetch_and_maybe_save(url, ticker, f"stock_{section}", cache_key)
+        except MomoError as exc:
+            stale = self._cache.get_stale(cache_key)
+            if stale is not None:
+                fallback = copy.deepcopy(stale)
+                trust = dict(fallback.get("trust") or {})
+                trust["staleFallback"] = True
+                trust["upstreamError"] = str(exc)
+                fallback["trust"] = trust
+                fallback["_stale_fallback"] = True
+                return fallback
+            raise
         data = (
             parse_stock_metric_detail_html(html)
             if metric_detail
@@ -355,22 +541,18 @@ class Momo:
 
         results: Dict[str, Dict[str, Any]] = {}
         errors: List[Dict[str, str]] = []
-        worker_count = max(1, min(len(requested), self.config.max_workers))
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            future_map = {
-                executor.submit(self.get_stock_section, ticker, section): section
+        orchestrator = FetchOrchestrator(self.config.max_workers)
+        section_results, summary = orchestrator.run(
+            "stock",
+            {
+                section: lambda section=section: self.get_stock_section(ticker, section)
                 for section in requested
-            }
-            for future in as_completed(future_map):
-                section = future_map[future]
-                try:
-                    results[section] = future.result()
-                except MomoError as exc:
-                    logger.warning("Failed to fetch stock section %s for %s: %s", section, ticker, exc)
-                    errors.append({"section": section, "error": str(exc)})
-                except Exception as exc:
-                    logger.exception("Unexpected error in stock section %s for %s", section, ticker)
-                    errors.append({"section": section, "error": f"Unexpected error: {exc}"})
+            },
+        )
+        results.update(section_results)
+        for section, reason in summary.failed.items():
+            logger.warning("Failed to fetch stock section %s for %s: %s", section, ticker, reason)
+            errors.append({"section": section, "error": reason})
 
         if discover_metric_pages:
             metrics = results.get("business_metrics") or {}
@@ -391,29 +573,23 @@ class Momo:
                 route_sections.setdefault(section, route)
 
             requested.extend(route_sections)
-            with ThreadPoolExecutor(
-                max_workers=max(1, min(len(route_sections), self.config.max_workers))
-            ) as executor:
-                future_map = {
-                    executor.submit(
-                        self._get_stock_section_by_route,
-                        ticker,
-                        section,
-                        route,
-                        True,
-                    ): section
+            metric_results, metric_summary = orchestrator.run(
+                "stock",
+                {
+                    section: lambda section=section, route=route: self._get_stock_section_by_route(
+                        ticker, section, route, True
+                    )
                     for section, route in route_sections.items()
-                }
-                for future in as_completed(future_map):
-                    section = future_map[future]
-                    try:
-                        results[section] = future.result()
-                    except MomoError as exc:
-                        logger.warning("Failed to fetch stock section %s for %s: %s", section, ticker, exc)
-                        errors.append({"section": section, "error": str(exc)})
-                    except Exception as exc:
-                        logger.exception("Unexpected error in stock section %s for %s", section, ticker)
-                        errors.append({"section": section, "error": f"Unexpected error: {exc}"})
+                },
+            )
+            results.update(metric_results)
+            summary.attempted.extend(metric_summary.attempted)
+            summary.available.extend(metric_summary.available)
+            summary.failed.update(metric_summary.failed)
+            summary.provider_latency_ms.update(metric_summary.provider_latency_ms)
+            for section, reason in metric_summary.failed.items():
+                logger.warning("Failed to fetch stock section %s for %s: %s", section, ticker, reason)
+                errors.append({"section": section, "error": reason})
 
         data = assemble_stock_data(ticker, results, errors or None)
         available = sorted(results.keys())
@@ -421,6 +597,13 @@ class Momo:
         data["_meta"]["sectionsAvailable"] = available
         data["_meta"]["sectionCoveragePct"] = round(len(available) / max(len(requested), 1) * 100.0, 1)
         data["_meta"]["sourceErrorCount"] = len(errors)
+        summary_dict = summary.as_dict()
+        summary_dict["ticker"] = ticker
+        summary_dict["exitReason"] = "partial" if errors else "ok"
+        summary_dict["available"] = available
+        summary_dict["attempted"] = requested
+        summary_dict["providerLatencyMs"] = dict(self.provider_latencies_ms)
+        self.run_summaries.append(summary_dict)
         if dump_json:
             self.save_json(data, dump_path)
         return data
@@ -429,7 +612,7 @@ class Momo:
         self,
         stock_data: Mapping[str, Any],
         price_data: Any = None,
-        period: str = "5y",
+        period: str = "10y",
         interval: str = "1d",
         auto_fetch_price: bool = True,
         timeframes: Optional[Sequence[Any]] = None,
@@ -484,7 +667,7 @@ class Momo:
         ticker: str,
         sections: Optional[Sequence[str]] = None,
         price_data: Any = None,
-        period: str = "5y",
+        period: str = "10y",
         interval: str = "1d",
         auto_fetch_price: bool = True,
         timeframes: Optional[Sequence[Any]] = None,
@@ -512,25 +695,18 @@ class Momo:
             return []
         normalized = [_validate_ticker(t) for t in tickers]
         results: Dict[str, Dict[str, Any]] = {}
-        outer_workers = max(1, min(len(normalized), 4))
-        with ThreadPoolExecutor(max_workers=outer_workers) as executor:
-            future_map = {}
-            for ticker in normalized:
-                dump_path = (dump_folder / f"momo_{ticker.lower()}_stock.json") if dump_folder else None
-                future = executor.submit(
-                    self.get_stock_data, ticker, sections, dump_json, dump_path
+        for ticker in normalized:
+            dump_path = (dump_folder / f"momo_{ticker.lower()}_stock.json") if dump_folder else None
+            try:
+                results[ticker] = self.get_stock_data(
+                    ticker, sections, dump_json, dump_path
                 )
-                future_map[future] = ticker
-            for future in as_completed(future_map):
-                ticker = future_map[future]
-                try:
-                    results[ticker] = future.result()
-                except Exception as exc:
-                    results[ticker] = {
-                        "ticker": ticker,
-                        "assetType": "stock",
-                        "errors": [{"section": "all", "error": str(exc)}],
-                    }
+            except MomoError as exc:
+                results[ticker] = {
+                    "ticker": ticker,
+                    "assetType": "stock",
+                    "errors": [{"section": "all", "error": str(exc)}],
+                }
         return [results[ticker] for ticker in normalized]
 
     # -- compare multiple tickers ---------------------------------------------------
@@ -548,21 +724,16 @@ class Momo:
         if not tickers:
             return []
         results: Dict[str, Dict[str, Any]] = {}
-        with ThreadPoolExecutor(max_workers=min(len(tickers), 4)) as executor:
-            future_map = {}
-            for t in tickers:
-                dump_path = (dump_folder / f"momo_{t.strip().lower()}_data.json") if dump_folder else None
-                future_map[executor.submit(self.get_etf_data, t, dump_json, dump_path)] = t
-            for future in as_completed(future_map):
-                t = future_map[future]
-                try:
-                    results[t] = future.result()
-                except Exception as e:
-                    logger.error("Failed to fetch all data for %s: %s", t, e)
-                    results[t] = {
-                        "ticker": t.strip().upper(),
-                        "errors": [{"section": "all", "error": str(e)}],
-                    }
+        for t in tickers:
+            dump_path = (dump_folder / f"momo_{t.strip().lower()}_data.json") if dump_folder else None
+            try:
+                results[t] = self.get_etf_data(t, dump_json, dump_path)
+            except MomoError as e:
+                logger.error("Failed to fetch all data for %s: %s", t, e)
+                results[t] = {
+                    "ticker": t.strip().upper(),
+                    "errors": [{"section": "all", "error": str(e)}],
+                }
         return [results[t] for t in tickers if t in results]
 
     # -- JSON export -----------------------------------------------------------------
@@ -570,11 +741,9 @@ class Momo:
     def save_json(self, data: Dict[str, Any], dump_path: Optional[Path] = None) -> Path:
         """Save ETF/stock data to a JSON file and return its path."""
         output_path = Path(dump_path) if dump_path else Path(f"momo_{data.get('ticker', 'unknown').lower()}_data.json")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        logger.info("Data saved to %s", output_path)
-        return output_path
+        result = atomic_json_write(output_path, data)
+        logger.info("Data saved to %s", result)
+        return result
 
     # Legacy alias retained so older code calling this private name continues
     # to work without changes.

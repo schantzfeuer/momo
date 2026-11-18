@@ -4,34 +4,10 @@ from math import isfinite, sqrt
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import numpy as np
 from .market_data import _clip, _py
+from ..core.units import first_number, parse_number, parse_percent, normalize_financial
 
 def _to_number(value: Any, percent_as_fraction: bool = False) -> Optional[float]:
-    """Parse StockAnalysis values such as '$4.51T', '10.81%', and 'n/a'."""
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float, np.number)):
-        number = float(value)
-        return number if isfinite(number) else None
-    text = str(value).strip().replace(",", "")
-    if not text or text.lower() in {"n/a", "na", "none", "null", "-", "--"}:
-        return None
-    negative = text.startswith("(") and text.endswith(")")
-    text = text.strip("()")
-    is_percent = text.endswith("%")
-    text = text.replace("$", "").replace("€", "").replace("£", "").replace("%", "").strip()
-    multiplier = 1.0
-    if text and text[-1].upper() in {"K", "M", "B", "T"}:
-        multiplier = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}[text[-1].upper()]
-        text = text[:-1]
-    try:
-        number = float(text) * multiplier
-    except ValueError:
-        return None
-    if negative:
-        number = -number
-    if is_percent and percent_as_fraction:
-        number /= 100.0
-    return number
+    return normalize_financial(value, percent=percent_as_fraction).value
 
 def _first_number(*values: Any, percent_as_fraction: bool = False) -> Optional[float]:
     for value in values:
@@ -147,24 +123,24 @@ class FundamentalValuationEngine:
         balance = self._ttm("balanceSheet")
 
         est_stats = ((self.forecast.get("estimates") or {}).get("stats") or {}).get("annual") or {}
-        revenue_forecast = _first_number((est_stats.get("revenueNext") or {}).get("growth"))
-        eps_forecast = _first_number((est_stats.get("epsNext") or {}).get("growth"))
+        revenue_forecast = _first_number((est_stats.get("revenueNext") or {}).get("growth"), percent_as_fraction=True)
+        eps_forecast = _first_number((est_stats.get("epsNext") or {}).get("growth"), percent_as_fraction=True)
         if revenue_forecast is None:
-            revenue_forecast = _first_number(analysts.get("revenue3y"))
+            revenue_forecast = _first_number(analysts.get("revenue3y"), percent_as_fraction=True)
         if eps_forecast is None:
-            eps_forecast = _first_number(analysts.get("eps3y"))
+            eps_forecast = _first_number(analysts.get("eps3y"), percent_as_fraction=True)
 
         annual_income = self._annual_rows("incomeStatement")
         annual_cash = self._annual_rows("cashFlow")
-        rev_vals = [(r.get("revenue")) for r in annual_income[-5:] if _first_number(r.get("revenue"))]
-        fcf_vals = [(r.get("fcf")) for r in annual_cash[-5:] if _first_number(r.get("fcf"))]
-        rev_cagr = _cagr([float(v) for v in rev_vals], len(rev_vals) - 1) if len(rev_vals) >= 2 else None
-        fcf_cagr = _cagr([float(v) for v in fcf_vals], len(fcf_vals) - 1) if len(fcf_vals) >= 2 else None
+        rev_vals = [parse_number(r.get("revenue")) for r in annual_income[-5:] if parse_number(r.get("revenue")) is not None]
+        fcf_vals = [parse_number(r.get("fcf")) for r in annual_cash[-5:] if parse_number(r.get("fcf")) is not None]
+        rev_cagr = _cagr(rev_vals, len(rev_vals) - 1) if len(rev_vals) >= 2 else None
+        fcf_cagr = _cagr(fcf_vals, len(fcf_vals) - 1) if len(fcf_vals) >= 2 else None
         eps = _first_number(income.get("epsdil"), income.get("epsBasic"), self._stat_values("incomeStatement").get("eps"))
-        lynch_growth_pct = _first_number(analysts.get("eps3y"), eps_forecast)
+        lynch_growth_pct = eps_forecast if eps_forecast is not None else _first_number(analysts.get("eps3y"), percent_as_fraction=True)
         book_value_per_share = _first_number(self._stat_values("balanceSheet").get("bvps"))
         lynch_fair_value = (
-            eps * lynch_growth_pct
+            eps * lynch_growth_pct * 100.0
             if eps is not None and eps > 0 and lynch_growth_pct is not None and lynch_growth_pct > 0
             else None
         )
@@ -188,20 +164,20 @@ class FundamentalValuationEngine:
             "forwardPe": _first_number(ratios.get("peForward"), (self.data.get("fundamentals") or {}).get("forwardPE")),
             "pFcf": _first_number(ratios.get("pfcf")),
             "fcfYield": _first_number(divs.get("fcfYield")),
-            "grossMargin": _first_number(margins.get("grossMargin")),
-            "operatingMargin": _first_number(margins.get("operatingMargin")),
-            "profitMargin": _first_number(margins.get("profitMargin")),
-            "fcfMargin": _first_number(margins.get("fcfMargin")),
-            "roe": _first_number(eff.get("roe")),
-            "roic": _first_number(eff.get("roic")),
-            "wacc": _first_number(eff.get("wacc")),
+            "grossMargin": _first_number(margins.get("grossMargin"), percent_as_fraction=True),
+            "operatingMargin": _first_number(margins.get("operatingMargin"), percent_as_fraction=True),
+            "profitMargin": _first_number(margins.get("profitMargin"), percent_as_fraction=True),
+            "fcfMargin": _first_number(margins.get("fcfMargin"), percent_as_fraction=True),
+            "roe": _first_number(eff.get("roe"), percent_as_fraction=True),
+            "roic": _first_number(eff.get("roic"), percent_as_fraction=True),
+            "wacc": _first_number(eff.get("wacc"), percent_as_fraction=True),
             "currentRatio": _first_number(pos.get("currentRatio")),
             "debtEbitda": _first_number(pos.get("debtEbitda")),
             "zScore": _first_number(scores.get("zScore")),
             "fScore": _first_number(scores.get("fScore")),
-            "dividendYield": _first_number(divs.get("dividendYield")),
-            "buybackYield": _first_number(divs.get("buybackYield")),
-            "shareholderYield": _first_number(divs.get("totalReturn")),
+            "dividendYield": _first_number(divs.get("dividendYield"), percent_as_fraction=True),
+            "buybackYield": _first_number(divs.get("buybackYield"), percent_as_fraction=True),
+            "shareholderYield": _first_number(divs.get("totalReturn"), percent_as_fraction=True),
             "revenueForecastGrowthPct": revenue_forecast,
             "epsForecastGrowthPct": eps_forecast,
             "historicalRevenueCagr": rev_cagr,
@@ -217,15 +193,15 @@ class FundamentalValuationEngine:
 
     def quality_score(self, metrics: Mapping[str, Any]) -> Dict[str, Any]:
         growth = np.mean([
-            _score_linear(metrics.get("revenueForecastGrowthPct"), 0, 15),
-            _score_linear(metrics.get("epsForecastGrowthPct"), 0, 20),
+            _score_linear((metrics.get("revenueForecastGrowthPct") or 0) * 100, 0, 15),
+            _score_linear((metrics.get("epsForecastGrowthPct") or 0) * 100, 0, 20),
             _score_linear((metrics.get("historicalRevenueCagr") or 0) * 100, 0, 12),
         ])
         profitability = np.mean([
-            _score_linear(metrics.get("grossMargin"), 20, 60),
-            _score_linear(metrics.get("operatingMargin"), 10, 35),
-            _score_linear(metrics.get("fcfMargin"), 8, 30),
-            _score_linear(metrics.get("roic"), 10, 40),
+            _score_linear((metrics.get("grossMargin") or 0) * 100, 20, 60),
+            _score_linear((metrics.get("operatingMargin") or 0) * 100, 10, 35),
+            _score_linear((metrics.get("fcfMargin") or 0) * 100, 8, 30),
+            _score_linear((metrics.get("roic") or 0) * 100, 10, 40),
         ])
         health = np.mean([
             _score_linear(metrics.get("currentRatio"), 0.7, 1.5),
@@ -268,7 +244,7 @@ class FundamentalValuationEngine:
                     "name": group.get("name"),
                     "date": point.get("x"),
                     "value": _py(_first_number(point.get("y")), 4),
-                    "growthPct": _py(_first_number(point.get("growth")), 2),
+                    "growthPct": _py((_first_number(point.get("growth"), percent_as_fraction=True) or 0) * 100, 2),
                     "change": _py(_first_number(point.get("change")), 4),
                 })
             return rows
@@ -320,25 +296,24 @@ class FundamentalValuationEngine:
     def dcf_value(self, metrics: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
         fcf = metrics.get("unleveredFcf") or metrics.get("fcf")
         shares = metrics.get("shares")
-        if not fcf or not shares or fcf <= 0 or shares <= 0:
+        wacc_raw = metrics.get("wacc")
+        rev_raw = metrics.get("revenueForecastGrowthPct")
+        eps_raw = metrics.get("epsForecastGrowthPct")
+        hist_fcf_g = metrics.get("historicalFcfCagr")
+        required_missing = [
+            name for name, value in (
+                ("fcf", fcf), ("shares", shares), ("wacc", wacc_raw),
+                ("revenue_growth", rev_raw), ("eps_growth", eps_raw),
+            ) if value is None
+        ]
+        if required_missing:
             return None
         flags: List[str] = []
-        wacc_raw = metrics.get("wacc")
-        if wacc_raw is None:
-            flags.append("discount rate defaulted")
-        wacc = (wacc_raw or 9.5) / 100.0
+        wacc = wacc_raw
         wacc = _clip(wacc, 0.07, 0.16)
-        rev_raw = metrics.get("revenueForecastGrowthPct")
-        if rev_raw is None:
-            flags.append("revenue growth defaulted")
-        rev_g = (rev_raw if rev_raw is not None else 6.0) / 100.0
-        eps_raw = metrics.get("epsForecastGrowthPct")
-        if eps_raw is None:
-            flags.append("EPS growth inferred")
-        eps_g = (eps_raw if eps_raw is not None else rev_g * 100.0) / 100.0
-        hist_fcf_g = metrics.get("historicalFcfCagr")
+        rev_g = rev_raw
+        eps_g = eps_raw
         if hist_fcf_g is None or not isfinite(hist_fcf_g):
-            flags.append("historical FCF growth unavailable")
             hist_fcf_g = rev_g
         base_growth = _clip(0.40 * rev_g + 0.35 * eps_g + 0.25 * hist_fcf_g, -0.03, 0.20)
         terminal_growth = min(0.03, max(0.015, base_growth * 0.20 + 0.012))
@@ -389,25 +364,17 @@ class FundamentalValuationEngine:
         stats = ((self.forecast.get("estimates") or {}).get("stats") or {}).get("annual") or {}
         forecast_eps = _first_number((stats.get("epsNext") or {}).get("this"))
         hist = self._historical_ratio_values("pe")
-        current_forward = metrics.get("forwardPe")
+        if not hist:
+            return None
         flags: List[str] = []
-        if hist:
-            low_m = float(np.quantile(hist, 0.25))
-            base_m = float(np.median(hist))
-            high_m = float(np.quantile(hist, 0.75))
-            multiple_quality = 20.0
-        elif current_forward:
-            low_m, base_m, high_m = current_forward * 0.8, current_forward, current_forward * 1.15
-            flags.append("historical P/E unavailable; current forward multiple used")
-            multiple_quality = 10.0
-        else:
-            low_m, base_m, high_m = 15.0, 20.0, 25.0
-            flags.append("generic P/E range used")
-            multiple_quality = 0.0
+        low_m = float(np.quantile(hist, 0.25))
+        base_m = float(np.median(hist))
+        high_m = float(np.quantile(hist, 0.75))
+        multiple_quality = 20.0
         if forecast_eps is None:
-            flags.append("forward EPS inferred from available earnings/growth")
+            return None
         quality = self.quality_score(metrics)["overall"]
-        growth = metrics.get("epsForecastGrowthPct") or 5.0
+        growth = (metrics.get("epsForecastGrowthPct") or 0.0) * 100.0
         adjustment = _clip(0.90 + (quality - 50) / 250.0 + growth / 500.0, 0.80, 1.20)
         base_m *= adjustment
         low_m = min(low_m, base_m * 0.85)
@@ -425,21 +392,13 @@ class FundamentalValuationEngine:
         if not fcfps or fcfps <= 0:
             return None
         hist = self._historical_ratio_values("pfcf")
+        if not hist:
+            return None
         flags: List[str] = []
-        if hist:
-            low_m = float(np.quantile(hist, 0.25))
-            base_m = float(np.median(hist))
-            high_m = float(np.quantile(hist, 0.75))
-            confidence = 80.0
-        elif metrics.get("pFcf"):
-            base_m = float(metrics["pFcf"])
-            low_m, high_m = base_m * 0.8, base_m * 1.15
-            flags.append("historical P/FCF unavailable; current multiple used")
-            confidence = 66.0
-        else:
-            low_m, base_m, high_m = 15.0, 20.0, 25.0
-            flags.append("generic P/FCF range used")
-            confidence = 45.0
+        low_m = float(np.quantile(hist, 0.25))
+        base_m = float(np.median(hist))
+        high_m = float(np.quantile(hist, 0.75))
+        confidence = 80.0
         return {
             "low": round(fcfps * low_m, 2), "base": round(fcfps * base_m, 2), "high": round(fcfps * high_m, 2),
             "baseWeight": 0.20, "weight": 0.20, "confidence": round(confidence, 1),
@@ -521,6 +480,28 @@ class FundamentalValuationEngine:
             for name, method in methods.items()
             for flag in (method.get("assumptionFlags") or [])
         ]
+        missing_fields = sorted(
+            key for key in core_metric_keys
+            if metrics.get(key) is None
+        )
+        insufficient_reasons = []
+        if metric_coverage < 0.60:
+            insufficient_reasons.append(
+                f"Metric coverage {metric_coverage:.1%} is below the required 60% threshold."
+            )
+        if len(methods) < 2:
+            insufficient_reasons.append(
+                "At least two independent valuation methods with complete required inputs are required."
+            )
+        insufficient_reasons.extend(
+            f"{name}: generic or fallback assumptions are not allowed for a decisive valuation."
+            for name in generic_methods
+        )
+        valuation_status = "INSUFFICIENT_DATA" if insufficient_reasons else "AVAILABLE"
+        if valuation_status == "INSUFFICIENT_DATA":
+            base = low = high = upside = None
+            confidence = 0.0
+            attractiveness = 50.0
         references = {
             "lynchFairValue": metrics.get("lynchFairValue"),
             "grahamNumber": metrics.get("grahamNumber"),
@@ -528,6 +509,22 @@ class FundamentalValuationEngine:
         }
 
         return {
+            "available": valuation_status == "AVAILABLE",
+            "status": valuation_status,
+            "insufficientDataReasons": insufficient_reasons,
+            "provenance": {
+                "data_coverage_ratio": round(metric_coverage, 6),
+                "missing_fields": missing_fields,
+                "fallback_assumptions_used": sorted(
+                    dict.fromkeys(
+                        item
+                        for name, method in methods.items()
+                        for item in (method.get("assumptionFlags") or [])
+                        if method.get("usesGenericFallback")
+                    )
+                ),
+                "source_freshness": self.data.get("generatedAt"),
+            },
             "currentPrice": _py(price, 4),
             "metrics": {k: _py(v, 6) for k, v in metrics.items()},
             "quality": quality,
@@ -546,10 +543,14 @@ class FundamentalValuationEngine:
             "consensus": {
                 "low": _py(low, 2), "base": _py(base, 2), "high": _py(high, 2),
                 "upsideToBasePct": _py(upside, 2),
-                "valuation": _valuation_label(upside),
+                "valuation": "Insufficient Data" if valuation_status == "INSUFFICIENT_DATA" else _valuation_label(upside),
                 "confidence": round(confidence, 2),
                 "confidenceLabel": _confidence_label(confidence),
                 "methodDispersionPct": round(dispersion * 100, 2),
             },
-            "attractiveness": {"score": round(attractiveness, 2), "rawScore": round(raw_attractiveness, 2), "label": _label_score(attractiveness)},
+            "attractiveness": {
+                "score": round(attractiveness, 2),
+                "rawScore": round(raw_attractiveness, 2),
+                "label": "Insufficient Data" if valuation_status == "INSUFFICIENT_DATA" else _label_score(attractiveness),
+            },
         }

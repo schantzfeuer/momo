@@ -1,0 +1,13 @@
+{
+  "ticker": "AAPL",
+  "quote": {"price": "225"},
+  "financials": {
+    "cashFlow": {"rows": [{"datekey": "TTM", "fcf": "110B", "fcfps": "7.33", "unleveredFCF": "115B"}]},
+    "balanceSheet": {"rows": [{"datekey": "TTM", "sharesOutTotalCommon": "15B", "netcash": "50B"}]},
+    "incomeStatement": {"rows": [{"datekey": "TTM", "epsdil": "6.20", "revenue": "420B"}]}
+  },
+  "analysis": {
+    "statistics": {"sections": {"ratios": {"values": {"pe": "18", "peForward": "16"}}}},
+    "forecast": {"estimates": {"stats": {"annual": {"epsNext": {"growth": "10.81%", "this": "7.25"}}}}}
+  }
+}

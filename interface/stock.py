@@ -97,40 +97,15 @@ def _analysis_via_momo(
     auto_fetch_price: bool,
     timeframes: Sequence[str],
 ) -> Dict[str, Any]:
-    """Use the new MOMO analysis bridge, with a fallback for v3.0 compatibility."""
-    if hasattr(client, "analyze_stock_data"):
-        return client.analyze_stock_data(
-            stock_data,
-            price_data=price_data,
-            period=period,
-            interval=interval,
-            auto_fetch_price=auto_fetch_price,
-            timeframes=timeframes,
-        )
-
-    # Compatibility bridge for momo.py v3.0, which does not expose the helper.
-    try:
-        from momo.engine import ProfessionalStockAnalyzer
-    except ImportError as exc:
-        raise MomoError("technical.py is unavailable for stock analysis.") from exc
-    analyzer = ProfessionalStockAnalyzer(
-        ticker=_display(stock_data.get("ticker")),
+    """Run the integrated stock report using the configured Momo client."""
+    return client.analyze_stock_data(
+        stock_data,
         price_data=price_data,
-        fundamental_data=stock_data,
         period=period,
         interval=interval,
-        auto_fetch=auto_fetch_price,
+        auto_fetch_price=auto_fetch_price,
+        timeframes=timeframes,
     )
-    result = analyzer.analyze(timeframes=timeframes)
-    meta = stock_data.get("_meta") or {}
-    result["dataContext"] = {
-        "source": meta.get("source") or "stockanalysis.com",
-        "generatedAt": stock_data.get("generatedAt"),
-        "sectionsAvailable": meta.get("sectionsAvailable") or [],
-        "sectionsRequested": meta.get("sectionsRequested") or [],
-        "sourceErrors": stock_data.get("errors") or [],
-    }
-    return result
 
 
 def _render_bullets(items: Sequence[Any], *, empty: str = "No material points were identified.") -> Text:
@@ -220,7 +195,7 @@ def render_data_quality(stock_data: Mapping[str, Any], analysis: Mapping[str, An
         ("Technical available", "yes" if report.get("technicalAvailable") else "no"),
         ("Technical datapoints", _display(report.get("technicalDataPoints"))),
         ("Timeframes", ", ".join(report.get("timeframesAnalyzed") or [])),
-        ("Source", _display(context.get("source"), _display(_deep_get(stock_data, "_meta", "source")))),
+        ("Fundamental data coverage", _display(context.get("sectionCoveragePct"), "—")),
         ("Sections", str(len(context.get("sectionsAvailable") or _deep_get(stock_data, "_meta", "sectionsAvailable", default=[]) or []))),
     ]
     table = Table.grid(expand=True, padding=(0, 1))
@@ -331,12 +306,20 @@ def render_fair_value(analysis: Mapping[str, Any]) -> Panel:
         )
 
     subtitle = ""
+    body: List[Any] = [table]
+    if fundamental.get("status") == "INSUFFICIENT_DATA":
+        reasons = fundamental.get("insufficientDataReasons") or []
+        warning = Text("Insufficient data: valuation and recommendation unavailable.", style=f"bold {PALETTE['bad']}")
+        if reasons:
+            warning.append("\n" + " ".join(str(reason) for reason in reasons), style=PALETTE["muted"])
+        body.append(warning)
+        subtitle = "INSUFFICIENT_DATA — no actionable valuation"
     if consensus:
-        subtitle = (
+        subtitle = subtitle or (
             f"{_display(consensus.get('valuation'))} • method dispersion "
             f"{_pct(consensus.get('methodDispersionPct'))}"
         )
-    return Panel(table, title="💎 Fundamental Fair Value", subtitle=subtitle, border_style=PALETTE["gold"], box=box.ROUNDED)
+    return Panel(Group(*body), title="💎 Fundamental Fair Value", subtitle=subtitle, border_style=PALETTE["gold"], box=box.ROUNDED)
 
 
 def render_news_stock(stock_data: Mapping[str, Any], max_rows: int = 6) -> Optional[Panel]:
@@ -680,8 +663,12 @@ def run_stock_pipeline(
             for ticker in tickers:
                 task = tasks[ticker]
                 try:
-                    progress.update(task, description="fetching StockAnalysis fundamentals")
-                    stock_data = client.get_stock_data(ticker, sections=sections)
+                    progress.update(task, description="fetching company fundamentals")
+                    stock_data = (
+                        client.Stock(ticker).get_data()
+                        if sections is None
+                        else client.get_stock_data(ticker, sections=sections)
+                    )
                     progress.advance(task)
 
                     price_data = None
@@ -691,16 +678,15 @@ def run_stock_pipeline(
                         if fetch_yahoo_history is not None:
                             try:
                                 price_data = fetch_yahoo_history(ticker, period=period, interval=interval)
-                            except Exception as exc:
-                                # Continue in fundamental-only mode; the reason appears in technical unavailable.
+                            except Exception:
                                 stock_data.setdefault("errors", []).append({
                                     "section": "historical_price",
-                                    "error": str(exc),
+                                    "error": "Historical price data could not be retrieved.",
                                 })
                         else:
                             stock_data.setdefault("errors", []).append({
                                 "section": "historical_price",
-                                "error": "technical.py/yfinance is unavailable",
+                                "error": "Technical analysis dependencies are unavailable.",
                             })
                     progress.advance(task)
 
@@ -720,7 +706,7 @@ def run_stock_pipeline(
                         progress.update(task, description="building visual dashboard")
                         try:
                             visual_path = output_dir / visual_filename(ticker)
-                            write_stock_visual_report(ticker, price_data, analysis, visual_path)
+                            write_stock_visual_report(ticker, price_data, analysis, visual_path, stock_data)
                             visual_reports.append(visual_path)
                         except Exception as exc:
                             visual_failures.append((ticker, str(exc)))
@@ -785,4 +771,13 @@ def run_stock_pipeline(
             table.add_row(ticker, reason)
         console.print(Panel(table, title="❌ Failed Tickers", border_style=PALETTE["bad"], box=box.ROUNDED))
 
+    run_summary = {
+        "assetType": "stock",
+        "exitReason": "ok" if results and not failures else ("partial" if results else "failed"),
+        "attempted": list(tickers),
+        "available": [data.get("ticker") for data, _ in results],
+        "failed": {ticker: reason for ticker, reason in failures},
+        "providerLatencyMs": {},
+    }
+    _json_dump(output_dir / "momo_run_summary.json", run_summary)
     return 0 if results else 1

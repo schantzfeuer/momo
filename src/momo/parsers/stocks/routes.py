@@ -1,6 +1,7 @@
 from __future__ import annotations
 import re
-from typing import Any, Callable, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional, Protocol
 from bs4 import BeautifulSoup as bs
 from ...core.exceptions import MomoValidationError
 from ...extractors.sveltekit import _extract_embedded_data
@@ -92,3 +93,26 @@ def _ticker_from_stock_html(html: str) -> Optional[str]:
     href = canonical.get("href") if canonical else ""
     match = re.search(r"/stocks/([^/]+)/", href)
     return match.group(1).upper() if match else None
+
+
+class StockProvider(Protocol):
+    name: str
+    base_url: str
+
+    def route(self, section: str) -> Optional[str]:
+        ...
+
+    def parse(self, section: str, html: str) -> Dict[str, Any]:
+        ...
+
+
+@dataclass(frozen=True)
+class StockAnalysisProvider:
+    name: str = "stockanalysis"
+    base_url: str = "https://stockanalysis.com/stocks"
+
+    def route(self, section: str) -> Optional[str]:
+        return STOCK_SECTION_ROUTES.get(section)
+
+    def parse(self, section: str, html: str) -> Dict[str, Any]:
+        return parse_stock_section_html(section, html)

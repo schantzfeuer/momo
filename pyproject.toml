@@ -4,21 +4,30 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "momo"
-version = "3.1.6a1"
+version = "3.1.7a0"
 description = "Stock and ETF research data collection and analysis"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["requests>=2.31", "beautifulsoup4>=4.12"]
+dependencies = ["requests>=2.31,<3", "beautifulsoup4>=4.12,<5"]
 
 [project.optional-dependencies]
-analysis = ["numpy>=1.24", "pandas>=2.0", "yfinance>=0.2.40"]
-cli = ["rich>=13.7", "typer>=0.12"]
-test = ["pytest>=7"]
+analysis = ["numpy>=1.24,<3", "pandas>=2.0,<4", "yfinance>=0.2.40,<2", "TA-Lib>=0.5.1,<1"]
+cli = ["rich>=13.7,<16", "typer>=0.12,<1"]
+test = ["pytest>=7,<10", "pytest-cov>=5,<7", "pandas>=2.0,<4", "TA-Lib>=0.5.1,<1"]
+
+[project.scripts]
+momo = "momo.__main__:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
-include = ["momo*"]
+where = ["src", "."]
+include = ["momo*", "interface*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+  "unit: fast isolated unit test",
+  "parser: HTML or JSON parser test",
+  "integration: integration test",
+]

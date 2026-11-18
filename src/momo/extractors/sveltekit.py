@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict, List, Optional
 from bs4 import BeautifulSoup as bs
 from ..core.config import logger
+from ..core.exceptions import SchemaMismatchError
 
 def _extract_data_array_text(script_text: str) -> Optional[str]:
     """Find `data: [ ... ]` text inside a SvelteKit script, tracking brackets
@@ -129,16 +130,16 @@ def _extract_embedded_data(html: str) -> Dict[str, Any]:
 
         arr_text = _extract_data_array_text(text)
         if not arr_text:
-            continue
+            raise SchemaMismatchError("SvelteKit script contains no extractable data array.")
 
         json_text = _js_object_literal_to_json(arr_text)
         try:
             data_list = json.loads(json_text)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise SchemaMismatchError("SvelteKit embedded data is not valid JSON.") from exc
 
         if not isinstance(data_list, list):
-            continue
+            raise SchemaMismatchError("SvelteKit data array has an invalid top-level shape.")
 
         for entry in data_list:
             if isinstance(entry, dict) and isinstance(entry.get("data"), dict):

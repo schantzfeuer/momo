@@ -21,10 +21,10 @@ class TimeframeSpec:
     bar_days: int = 1
 
 DEFAULT_TIMEFRAMES: Dict[str, TimeframeSpec] = {
-    "1m": TimeframeSpec("1m", "Short Term (1 month)", 21, 126, 0.80, 0.20, 1),
-    "3m": TimeframeSpec("3m", "Swing / Tactical (3 months)", 63, 252, 0.65, 0.35, 2),
-    "6m": TimeframeSpec("6m", "Medium Term (6 months)", 126, 504, 0.45, 0.55, 5),
-    "12m": TimeframeSpec("12m", "Long Term (12 months)", 252, 756, 0.25, 0.75, 10),
+    "1m": TimeframeSpec("1m", "Short Term (1 month)", 21, 252, 0.80, 0.20, 1),
+    "3m": TimeframeSpec("3m", "Swing / Tactical (3 months)", 63, 400, 0.65, 0.35, 2),
+    "6m": TimeframeSpec("6m", "Medium Term (6 months)", 126, 1000, 0.45, 0.55, 5),
+    "12m": TimeframeSpec("12m", "Long Term (12 months)", 252, 2000, 0.25, 0.75, 10),
 }
 
 def resolve_timeframes(timeframes: Optional[Sequence[Any]] = None) -> List[TimeframeSpec]:
@@ -76,6 +76,14 @@ def analyze_technical_timeframe(price_or_indicators: pd.DataFrame, spec: Timefra
     kijun = _series_last(df["Kijun_sen"])
     span_a = _series_last(df["Senkou_span_a"])
     span_b = _series_last(df["Senkou_span_b"])
+    stoch_k = _series_last(df["Stoch_%K"])
+    stoch_d = _series_last(df["Stoch_%D"])
+    bb_upper = _series_last(df["BB_upper"])
+    bb_middle = _series_last(df["BB_middle"])
+    bb_lower = _series_last(df["BB_lower"])
+    adx = _series_last(df["ADX"])
+    plus_di = _series_last(df["PLUS_DI"])
+    minus_di = _series_last(df["MINUS_DI"])
 
     # ------------------------------------------------------------------
     # Continuous score. Binary comparisons can easily push every horizon to
@@ -96,6 +104,14 @@ def analyze_technical_timeframe(price_or_indicators: pd.DataFrame, spec: Timefra
 
     macd_spread = macd - macd_signal
     score += 6.0 * _bounded_tanh(macd_spread, max(atr * 0.35, price * 0.0025))
+    if stoch_k is not None:
+        score += 3.0 * _bounded_tanh(stoch_k - 50.0, 25.0)
+    if bb_upper is not None and bb_middle is not None and bb_lower is not None:
+        band_half_width = max((bb_upper - bb_lower) / 2.0, atr * 0.25)
+        score += 3.0 * _bounded_tanh((price - bb_middle) / band_half_width, 1.0)
+    if adx is not None and plus_di is not None and minus_di is not None:
+        trend_strength = min(adx / 40.0, 1.0)
+        score += 5.0 * _bounded_tanh(plus_di - minus_di, 20.0) * trend_strength
 
     # RSI is centered around 50; extreme overbought readings are reduced so
     # strong momentum is not treated as asymmetrical risk-free upside.
@@ -221,6 +237,10 @@ def analyze_technical_timeframe(price_or_indicators: pd.DataFrame, spec: Timefra
         "macdHistogramDecreasing": changed_direction("MACD_hist", increasing=False),
         "macdZeroBullishCross": crossed_threshold("MACD", 0.0, upward=True),
         "macdZeroBearishCross": crossed_threshold("MACD", 0.0, upward=False),
+        "stochasticBullishCross": crossed_above("Stoch_%K", "Stoch_%D"),
+        "stochasticBearishCross": crossed_below("Stoch_%K", "Stoch_%D"),
+        "directionalBullishCross": crossed_above("PLUS_DI", "MINUS_DI"),
+        "directionalBearishCross": crossed_below("PLUS_DI", "MINUS_DI"),
         "atrExpansion": changed_direction("ATR", increasing=True),
         "atrContraction": changed_direction("ATR", increasing=False),
         "volatilityExpansion": value_changed_direction(
@@ -266,7 +286,10 @@ def analyze_technical_timeframe(price_or_indicators: pd.DataFrame, spec: Timefra
     elif score <= 40:
         trend = "Downtrend"
 
-    indicator_values = [sma20, sma50, sma200, rsi, macd, macd_signal, vwap, tenkan, kijun, span_a, span_b]
+    indicator_values = [
+        sma20, sma50, sma200, rsi, macd, macd_signal, vwap, tenkan, kijun, span_a, span_b,
+        stoch_k, stoch_d, bb_upper, bb_middle, bb_lower, adx, plus_di, minus_di,
+    ]
     indicator_coverage = sum(v is not None for v in indicator_values) / len(indicator_values)
     market_meta = dict((getattr(price_or_indicators, "attrs", {}) or {}).get("market_meta") or {})
     price_quality = market_meta.get("quality") or {}
@@ -300,6 +323,10 @@ def analyze_technical_timeframe(price_or_indicators: pd.DataFrame, spec: Timefra
         "indicators": {
             "sma20": _py(sma20, 4), "sma50": _py(sma50, 4), "sma200": _py(sma200, 4),
             "rsi14": _py(rsi, 2), "macd": _py(macd, 4), "macdSignal": _py(macd_signal, 4),
+            "stochasticK": _py(stoch_k, 2), "stochasticD": _py(stoch_d, 2),
+            "bollingerUpper": _py(bb_upper, 4), "bollingerMiddle": _py(bb_middle, 4),
+            "bollingerLower": _py(bb_lower, 4),
+            "adx14": _py(adx, 2), "plusDI14": _py(plus_di, 2), "minusDI14": _py(minus_di, 2),
             "vwap20": _py(vwap, 4), "vwap60": _py(vwap60, 4), "atr14": _py(atr, 4),
             "annualizedVolatility": _py(annual_vol, 4),
             "ichimoku": {"tenkan": _py(tenkan, 4), "kijun": _py(kijun, 4), "spanA": _py(span_a, 4), "spanB": _py(span_b, 4)},

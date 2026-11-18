@@ -17,7 +17,7 @@ class ProfessionalStockAnalyzer:
         ticker: str,
         price_data: Optional[pd.DataFrame] = None,
         fundamental_data: Optional[Mapping[str, Any]] = None,
-        period: str = "5y",
+        period: str = "10y",
         interval: str = "1d",
         auto_fetch: bool = True,
     ):
@@ -27,10 +27,8 @@ class ProfessionalStockAnalyzer:
         if price_data is None and auto_fetch:
             try:
                 price_data = fetch_yahoo_history(self.ticker, period=period, interval=interval)
-            except Exception as exc:
-                # Fundamental analysis remains useful when the historical price
-                # provider is unavailable. The error is recorded in data quality.
-                self.price_error = str(exc)
+            except Exception:
+                self.price_error = "Historical price data could not be retrieved."
                 price_data = None
         self.price_data = standardize_ohlcv(price_data) if price_data is not None else None
         self.indicators = compute_indicators(self.price_data) if self.price_data is not None else None
