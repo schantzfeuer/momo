@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import math
 import re
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 from momo.core.units import parse_number
@@ -233,7 +234,8 @@ def _percent(value: Any, signed: bool = False, fraction: bool = False) -> str:
     if fraction:
         number *= 100
     sign = "+" if signed and number > 0 else ""
-    return f"{sign}{number:.1f}%"
+    rounded = Decimal(str(number)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    return f"{sign}{rounded}%"
 
 
 def _fund_percent(value: Any, fraction: bool = False, decimals: int = 1) -> str:
@@ -418,7 +420,7 @@ def _metric_value(key: str, value: Any) -> str:
         "roe", "roic", "wacc", "dividendYield", "buybackYield", "shareholderYield",
         "revenueForecastGrowthPct", "epsForecastGrowthPct",
     }:
-        return _percent(value)
+        return _percent(value, fraction=True)
     if key in {"historicalRevenueCagr", "historicalFcfCagr"}:
         return _percent(value, fraction=True)
     if key in {"pe", "forwardPe", "pFcf", "currentRatio", "debtEbitda"}:
@@ -1402,11 +1404,16 @@ def _company_information_html(data: Mapping[str, Any]) -> str:
             if not isinstance(item, Mapping):
                 continue
             firm = _pick_value((item,), "company", "analyst", "firm", "title") or "Analyst"
-            action = _pick_value((item,), "action", "rating", "grade") or "—"
+            action = _pick_value((item,), "action", "action_rt")
+            rating = _pick_value((item,), "rating", "rating_new", "grade")
+            action_rating = " · ".join(
+                str(value) for value in (action, rating) if value not in (None, "")
+            ) or "—"
             date = _pick_value((item,), "date", "published")
-            if action is not None or date is not None:
+            if action_rating != "—" or date is not None:
                 rating_rows.append(
-                    f"<tr><td>{_escape(firm)}</td><td>{_escape(action)}</td><td>{_escape(date or '—')}</td></tr>"
+                    f"<tr><td>{_escape(firm)}</td><td>{_escape(action_rating)}</td>"
+                    f"<td>{_escape(date or '—')}</td></tr>"
                 )
     forecast_html = (
         f'<div class="grid insight-grid forecast-cards">{"".join(forecast_cards)}</div>'

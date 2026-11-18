@@ -1,6 +1,6 @@
 """Momo stock and ETF data collection library."""
 
-__version__ = "3.1.7a0"
+__version__ = "3.1.7a1"
 
 from .assemblers.etf import assemble_etf_data
 from .assemblers.stock import assemble_stock_data

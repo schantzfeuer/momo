@@ -446,6 +446,58 @@ def test_etf_cli_and_visual_use_the_same_aum_value_and_format(tmp_path):
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "key,value,expected",
+    [
+        ("revenueForecastGrowthPct", 0.693863, "69.4%"),
+        ("epsForecastGrowthPct", 0.712933, "71.3%"),
+        ("historicalRevenueCagr", 0.683014, "68.3%"),
+        ("historicalFcfCagr", 0.856865, "85.7%"),
+        ("grossMargin", 0.7492, "74.9%"),
+        ("operatingMargin", 0.6608, "66.1%"),
+        ("profitMargin", 0.6254, "62.5%"),
+        ("fcfMargin", 0.4111, "41.1%"),
+        ("roe", 1.1736, "117.4%"),
+        ("roic", 0.9686, "96.9%"),
+        ("wacc", 0.1645, "16.5%"),
+        ("fcfYield", 0.0396, "4.0%"),
+        ("dividendYield", 0.0066, "0.7%"),
+        ("buybackYield", 0.0106, "1.1%"),
+        ("shareholderYield", 0.017, "1.7%"),
+    ],
+)
+def test_stock_visual_formats_fractional_metrics_as_percentages(key, value, expected):
+    from interface.visual import _metric_value
+
+    assert _metric_value(key, value) == expected
+
+
+@pytest.mark.unit
+def test_stock_visual_includes_provider_analyst_action_and_rating():
+    from interface.visual import _analysis_results_html
+
+    stock_data = {
+        "analysis": {
+            "forecast": {
+                "recentRatings": [
+                    {
+                        "firm": "Argus Research",
+                        "action_rt": "Reiterates",
+                        "rating_new": "Buy",
+                        "date": "2026-11-18",
+                    }
+                ]
+            }
+        }
+    }
+
+    rendered = _analysis_results_html({}, "", "", stock_data)
+
+    assert "<td>Reiterates · Buy</td>" in rendered
+    assert "<td>2026-11-18</td>" in rendered
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "field,value",
     [
         ("timeout", 0),
